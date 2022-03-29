@@ -19,7 +19,7 @@ def getCLI(){
     cli += " --build ${params.Build}"
     cli += " --global-conf conf/${cephVersion}/${params.Group}/${params.Conf}.yaml"
     cli += " --inventory conf/inventory/${params.Inventory}.yaml"
-    cli += " --suite suites/${cephVersion}/${params.Group}/${params.Suite}.yaml"
+    cli += " --suite suites/${cephVersion}/${params.Group}/${params.Suite}"
     cli += " ${params.Additional_Args}"
 
     if(params.Override_Ceph_Base_URL?.trim()){
