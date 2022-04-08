@@ -22,6 +22,9 @@ def merge_dicts(dict1, dict2):
     Returns:
         Dict -> dictionary after merging overrides dict into test_suite dict
     """
+    if isinstance(dict1, list) and isinstance(dict2, list):
+        dict1.extend(dict2)
+        return dict1
     if not isinstance(dict1, dict) or not isinstance(dict2, dict):
         return dict2
     for k in dict2:
@@ -29,8 +32,6 @@ def merge_dicts(dict1, dict2):
             dict1[k] = merge_dicts(dict1[k], dict2[k])
         else:
             dict1[k] = dict2[k]
-        if dict1[k] is None:
-            del dict1[k]
     return dict1
 
 
@@ -66,7 +67,7 @@ def process_override(dir_name: str) -> List:
                 # It is optional. default is 1
 
               <key>: <override_value>
-                # override_value as null removes the item from the test
+                # give override_value as null if you want to ignore the existing key in test
           - test:
               <key>: <override_value>
 
@@ -100,7 +101,7 @@ def process_override(dir_name: str) -> List:
     if not override_data:
         return test_data["tests"]
 
-    for test in override_data.get("tests"):
+    for test in override_data.get("tests", list()):
         index = test["test"].pop("index", 1) - 1
         merge_dicts(test_data["tests"][index]["test"], test["test"])
 
@@ -115,9 +116,9 @@ def process_override(dir_name: str) -> List:
             if isinstance(cluster, str):
                 cluster_name = cluster
             else:
-                cluster_name = cluster.keys()[0]
+                cluster_name = [key for key in cluster.keys()][0]
                 override_config = cluster[cluster_name].get("config", {})
-                config.update(override_config)
+                merge_dicts(config, override_config)
 
             if "clusters" not in test["test"].keys():
                 test["test"]["clusters"] = dict()

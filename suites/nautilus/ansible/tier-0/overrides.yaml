@@ -7,7 +7,6 @@ tests:
           ceph_stable_release: nautilus
           ceph_stable_rh_storage: true
           ceph_test: true
-          journal_size: 1024
           ceph_conf_overrides:
             client:
               rgw crypt require ssl: false
@@ -20,4 +19,11 @@ tests:
               osd_pool_default_pgp_num: 64
             mon:
               mon_allow_pool_delete: true
-      polarion-id: CEPH-83571467
+          cephfs_pools:
+            -
+              name: cephfs_data
+              pgs: "8"
+            -
+              name: cephfs_metadata
+              pgs: "8"
+          journal_size: 1024
