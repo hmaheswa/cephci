@@ -22,9 +22,6 @@ def merge_dicts(dict1, dict2):
     Returns:
         Dict -> dictionary after merging overrides dict into test_suite dict
     """
-    if isinstance(dict1, list) and isinstance(dict2, list):
-        dict1.extend(dict2)
-        return dict1
     if not isinstance(dict1, dict) or not isinstance(dict2, dict):
         return dict2
     for k in dict2:
@@ -95,8 +92,11 @@ def process_override(dir_name: str) -> List:
         if file.endswith("overrides.yaml"):
             override_data = read_yaml(file)
             continue
-
-        test_data = read_yaml(file)
+		if os.path.isdir(file):
+		    tests_in_dir = process_override(file)
+			test_data["tests"].extend(tests_in_dir["tests"])
+		test_suite = read_yaml(file)
+        test_data["tests"].extend(test_suite["tests"])
 
     if not override_data:
         return test_data["tests"]
