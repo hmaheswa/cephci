@@ -53,7 +53,7 @@ def process_override(dir_name: str) -> List:
     Returns a readable dictionary based on the files found in dir_name.
 
     The directory must contain two files if you want to override.
-        - <test_suite>.yaml
+        - <test_suite>.yaml or a <directory> #'link' to a test_suite or directory basically
         - overrides.yaml
 
     overrides.yaml could have
@@ -92,13 +92,17 @@ def process_override(dir_name: str) -> List:
         if file.endswith("overrides.yaml"):
             override_data = read_yaml(file)
             continue
-
-        test_data = read_yaml(file)
+        if os.path.isdir(file):
+            test_suite = process_override(file)
+            test_data["tests"].extend(tests_suite["tests"])
+            continue
+        test_suite = read_yaml(file)
+        test_data["tests"].extend(test_suite["tests"])
 
     if not override_data:
         return test_data["tests"]
 
-    for test in override_data.get("tests"):
+    for test in override_data.get("tests", list()):
         index = test["test"].pop("index", 1) - 1
         merge_dicts(test_data["tests"][index]["test"], test["test"])
 
@@ -113,9 +117,9 @@ def process_override(dir_name: str) -> List:
             if isinstance(cluster, str):
                 cluster_name = cluster
             else:
-                cluster_name = cluster.keys()[0]
+                cluster_name = [key for key in cluster.keys()][0]
                 override_config = cluster[cluster_name].get("config", {})
-                config.update(override_config)
+                merge_dicts(config, override_config)
 
             if "clusters" not in test["test"].keys():
                 test["test"]["clusters"] = dict()
