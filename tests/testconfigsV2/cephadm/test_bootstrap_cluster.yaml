@@ -9,5 +9,4 @@ configs:
       orphan-initial-daemons: true
       allow-fqdn-hostname: true
       yes-i-know: true
-      copy-admin-keyring: true
     role: _admin

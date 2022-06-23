@@ -5,8 +5,5 @@ configs:
     class: Host
     component: ceph
     args:
-      host_name:
-        - node1
-        - node2
-        - node3
+      host_name: all
     role: _admin
