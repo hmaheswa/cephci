@@ -1,0 +1,45 @@
+---
+name: Configuration suite file for bucket operations on rgw client.
+must_pass: true
+parallel: false
+tests:
+    - runs_on: ceph-cluster1
+      config:
+          - test:
+                name: Running suite. to bootstrap cluster
+                desc: configuration to bootstrap cluster.
+                suite: misc/test_bootstrap_cluster.yaml
+          - test:
+                name: cluster deployment
+                desc: Configuration to deploy rgw node in cluster
+                module: workflow.py
+                steps:
+                    - method: apply
+                      class: Orch
+                      component: ceph
+                      args:
+                          service_type: rgw
+                          service_name: rgw.1
+                          placement:
+                              label: rgw
+                              hosts:
+                                  - host1
+                                  - host2
+                              count-per-host: 2
+                destroy-cluster: false
+          - test:
+                name: Creation of buckets
+                desc: Create buckets in rgw client
+                module: workflow.py
+                steps:
+                    - method: create
+                      class: Bucket
+                      component: radosgw-admin
+          - test:
+                name: Bucket listing
+                desc: List buckets in rgw client
+                module: workflow.py
+                steps:
+                    - method: list_bucket
+                      class: Bucket
+                      component: radosgw-admin

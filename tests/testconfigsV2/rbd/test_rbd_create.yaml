@@ -1,0 +1,17 @@
+---
+# test configuration info to create rbd pool
+configs:
+  - method: create
+    class: Rbd
+    component: rbd
+    args:
+      - pool_name: mirror_test
+        image_name: image_1
+        size: 1G
+      - pool_name: mirror_test
+        image_name: image_2
+        size: 1G
+      - pool_name: mirror_test
+        image_name: image_3
+        size: 1G
+    role: client

@@ -1,0 +1,29 @@
+---
+# test configuration info to verify status of rbd mirroring
+- configs:
+  - method: status
+    class: image
+    component: rbd_mirror
+    args:
+      image_spec: mirror_test/image_2
+      wait_until:
+        args:
+          max_attempts: 3
+          interval_seconds: 5
+          pattern:
+            key: state
+            value: up+stopped
+      role: ceph-cluster1:mon
+  - method: status
+    class: image
+    component: rbd_mirror
+    args:
+      image_spec: mirror_test/image_2
+      wait_until:
+        args:
+          max_attempts: 3
+          interval_seconds: 5
+          pattern:
+            key: state
+            value: up+replaying
+      role: ceph-cluster1:mon
