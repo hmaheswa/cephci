@@ -1,9 +1,0 @@
----
-# test configuration info to add hosts
-configs:
-  - method: add
-    class: Host
-    component: ceph
-    args:
-      host_name: all
-    role: _admin
