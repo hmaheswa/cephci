@@ -731,7 +731,8 @@ def run(args):
     # Initialize test return code
     rc = 0
 
-    if suite.get("suitev2"):
+    suite_v2 = args.get("suiteV2")
+    if suite_v2:
         passed = True
         for cluster in ceph_cluster_dict:
             kw = {

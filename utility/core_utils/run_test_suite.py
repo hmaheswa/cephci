@@ -1,17 +1,17 @@
+import sys
+sys.path.append("/home/hmaheswa/Documents/rhcs-qe-sdk_PR_test_module/rhcs-qe-sdk/src/RhcsQeSdk/tests")
 import builtins
 import datetime
 import importlib
 import logging
 import os
 import sys
-from rhcs_qe_sdk.src.rhcs_qe_sdk import tests
 
 from gevent import monkey
 
 from ceph.parallel import parallel
 from run import collect_recipe, create_nodes, store_cluster_state
 from utility.core_utils.execute_command import ExecuteCommandMixin
-from utility.core_utils.loader import LoaderMixin
 from utility.core_utils.parallel_executor import ParallelExecutor
 
 monkey.patch_all()
@@ -135,7 +135,6 @@ class RunTestSuite:
         self.fetch_test_details = run_details.fetch_test_details
 
         # self.cli_obj = CLI()
-        self.suite_config = LoaderMixin().load_file(config, kind="suites")
         self.parallel_executor = ParallelExecutor()
         self.jenkins_rc = 0
 
@@ -179,7 +178,7 @@ class RunTestSuite:
         test_data_file = test.get("test_data")
         test_data = importlib.import_module(test_data_file, package="test_configs")
         module = test.get("module")
-        module = importlib.import_module(module, package=tests)
+        module = importlib.import_module(module)
         tc = test
         tc["log-link"] = configure_logger(unique_test_name, self.run_dir)
         runs_on = test.get("runs_on", [None])
