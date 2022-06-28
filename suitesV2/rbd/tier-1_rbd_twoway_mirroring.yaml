@@ -1,6 +1,6 @@
 ---
 # sample global suite file
-name: Configuration suite file for testing rbd twoway mirroring.
+name: Configuration suite file to deploy cluster for two-way rbd mirroring.
 tests:
   - test:
       tcms_id: CEPH-1234
@@ -44,7 +44,7 @@ tests:
       desc: configuration for the creation of osd pool.
       test_data: ceph/test_pool_create.yaml
       module: test_ceph.py
-      runs_on: 
+      runs_on:
         - ceph-cluster1
         - ceph-cluster2
   - test:
@@ -53,7 +53,7 @@ tests:
       desc: configuration to initialize application pool.
       test_data: rbd/test_pool_init.yaml
       module: test_rbd.py
-      runs_on: 
+      runs_on:
         - ceph-cluster1
         - ceph-cluster2
   - test:

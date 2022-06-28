@@ -314,4 +314,5 @@ def load_suites(test_suites):
             log.info("Provided suite is a file")
             test_suite_catalogue.append(test_suite)
 
+    print(test_suites)
     return Suite(test_suite_catalogue).suites
