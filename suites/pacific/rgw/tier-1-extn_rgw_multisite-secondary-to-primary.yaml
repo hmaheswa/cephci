@@ -220,7 +220,7 @@ tests:
       name: create user
   # add datalog omap tests
   - test:
-      name:  datalog omap offload
+      name:  datalog omap offload on secondary
       desc: Execute datalog omap offload on secondary
       polarion-id: CEPH-83573691
       module: sanity_rgw_multisite.py
@@ -233,7 +233,7 @@ tests:
             timeout: 300
 
   - test:
-      name:  datalog omap offload
+      name:  datalog omap offload with multipart objects on secondary
       desc: Execute datalog omap offload with multipart objects on secondary
       polarion-id: CEPH-83573691
       module: sanity_rgw_multisite.py
@@ -246,7 +246,7 @@ tests:
             timeout: 300
 
   - test:
-      name:  datalog omap offload
+      name:  datalog omap offload on versioned bucket on secondary
       desc:  Execute datalog omap offload on versioned bucket on secondary
       polarion-id: CEPH-83573691
       module: sanity_rgw_multisite.py
@@ -258,7 +258,7 @@ tests:
             verify-io-on-site: ["ceph-pri"]
             timeout: 300
   - test:
-      name: datalog trim command
+      name: datalog trim command with delete marker enabled on secondary
       desc: Execute datalog trim command with delete marker enabled on secondary
       polarion-id: CEPH-83574591
       module: sanity_rgw_multisite.py

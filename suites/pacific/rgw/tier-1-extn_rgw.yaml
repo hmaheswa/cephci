@@ -68,7 +68,7 @@ tests:
   # STS tests
 
   - test:
-      name: STS Tests
+      name: STS Tests to Perform assume role on priciple user and perform IOs
       desc: Perform assume role on priciple user and perform IOs
       polarion-id: CEPH-83572938
       module: sanity_rgw.py
@@ -78,7 +78,7 @@ tests:
         config-file-name: test_sts_using_boto.yaml
         timeout: 500
   - test:
-      name: STS Tests
+      name: STS Tests to Perform assume role call with permissive session policies
       desc: Perform assume role call with permissive session policies
       polarion-id: CEPH-83574491
       comments: known issue. 1976883
@@ -88,7 +88,7 @@ tests:
         config-file-name: test_sts_using_boto_permissive_session_policy.yaml
         timeout: 500
   - test:
-      name: STS Tests
+      name: STS Tests Perform assume role call with restrictive session policies
       desc: Perform assume role call with restrictive session policies
       polarion-id: CEPH-83574492
       comments: known issue. 1976883
@@ -98,7 +98,7 @@ tests:
         config-file-name: test_sts_using_boto_restricted_session_policy.yaml
         timeout: 500
   - test:
-      name: STS Tests
+      name: STS Tests to Perform Server Side Copy
       desc: Perform Server Side Copy
       polarion-id: CEPH-83574522
       comments: Known issue BZ 2006194
@@ -108,7 +108,7 @@ tests:
         config-file-name: test_sts_using_boto_server_side_copy.yaml
         timeout: 500
   - test:
-      name: STS Tests
+      name: STS Tests for handling non-existent object condition
       desc: STS test using boto for handling non-existent object condition
       polarion-id: CEPH-83574539
       comments: Known issue BZ 2006184
@@ -118,7 +118,7 @@ tests:
         config-file-name: test_sts_using_boto.yaml
         timeout: 500
   - test:
-      name: STS Tests
+      name: STS test wit invalid arn in the role's policy
       desc: STS test wit invalid arn in the role's policy
       polarion-id: CEPH-83574537
       comments: Addresses bugzilla 2007335

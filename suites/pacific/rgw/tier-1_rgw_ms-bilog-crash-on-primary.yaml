@@ -187,7 +187,7 @@ tests:
               - "radosgw-admin zone list"
       desc: Retrieve the configured environment details
       module: exec.py
-      name: get shared realm info
+      name: get shared realm info on primary
       polarion-id: CEPH-83575227
   - test:
       abort-on-fail: true
@@ -203,7 +203,7 @@ tests:
               - "radosgw-admin zone list"
       desc: Retrieve the configured environment details
       module: exec.py
-      name: get shared realm info
+      name: get shared realm info on secondary
       polarion-id: CEPH-83575227
   # Test work flow
 

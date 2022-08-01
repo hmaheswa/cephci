@@ -49,7 +49,7 @@ tests:
 
   # Bucket Listing Tests
   - test:
-      name: Bucket Listing tests
+      name: ordered listing with top level objects
       desc: measure execution time for ordered listing with top level objects
       polarion-id: CEPH-83573545
       module: sanity_rgw.py
@@ -71,7 +71,7 @@ tests:
 
   # resharding tests
   - test:
-      name: Resharding tests
+      name: manual resharding tests
       desc: Resharding test - manual
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
@@ -91,7 +91,7 @@ tests:
 
   # lifecycle tests
   - test:
-      name: Bucket Lifecycle Object_expiration_tests
+      name: object expiration for Prefix and tag based filter for >1 days
       desc: Test object expiration for Prefix and tag based filter for >1 days
       polarion-id: CEPH-11179 # also applies to CEPH-11180
       module: sanity_rgw.py
@@ -101,7 +101,7 @@ tests:
         timeout: 300
 
   - test:
-      name: Bucket Lifecycle Object_expiration_tests
+      name: object expiration for non current version expiration
       desc: Test object expiration for non current version expiration
       polarion-id: CEPH-11190
       module: sanity_rgw.py
@@ -188,7 +188,7 @@ tests:
 
   # resharding tests
   - test:
-      name: Resharding tests
+      name: manual resharding tests post upgrade
       desc: Resharding test - manual
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
@@ -198,7 +198,7 @@ tests:
         timeout: 500
 
   - test:
-      name: Dynamic Resharding tests
+      name: Dynamic Resharding tests post upgrade
       desc: Resharding test - dynamic
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
@@ -209,7 +209,7 @@ tests:
 
   # lifecycle tests
   - test:
-      name: Bucket Lifecycle Object_expiration_tests
+      name: object expiration for Prefix and tag based filter for >1 days
       desc: Test object expiration for Prefix and tag based filter for >1 days
       polarion-id: CEPH-11180 # also applies to CEPH-11179
       module: sanity_rgw.py
@@ -219,7 +219,7 @@ tests:
         timeout: 300
 
   - test:
-      name: Bucket Lifecycle Object_expiration_tests
+      name: object expiration for non current version expiration
       desc: Test object expiration for non current version expiration
       polarion-id: CEPH-11190
       module: sanity_rgw.py
