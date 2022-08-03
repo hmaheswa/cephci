@@ -91,21 +91,21 @@ def run(ceph_cluster, **kw):
         ]
         for subvolume in subvolume_list:
             fs_util.create_subvolume(client1, **subvolume)
-        commands = [
-            f"mkdir -p {nfs_mounting_dir}",
-            f"mount -t nfs -o port=2049 {nfs_server}:{nfs_export_name} {nfs_mounting_dir}",
-        ]
-        for command in commands:
-            client1.exec_command(sudo=True, cmd=command)
+        rc = fs_util.cephfs_nfs_mount(
+            client1, nfs_server, nfs_export_name, nfs_mounting_dir
+        )
+        if not rc:
+            log.error("cephfs nfs export mount failed")
+            return 1
         out, rc = client1.exec_command(
             sudo=True,
             cmd=f"ceph fs subvolume getpath {fs_name} subvolume1 --group_name subvolume_group1",
         )
-        subvolume1_path = out.read().decode().rstrip()
+        subvolume1_path = out.rstrip()
         out, rc = client1.exec_command(
             sudo=True, cmd=f"ceph fs subvolume getpath {fs_name} subvolume2"
         )
-        subvolume2_path = out.read().decode().rstrip()
+        subvolume2_path = out.rstrip()
         commands = [
             f"python3 /home/cephuser/smallfile/smallfile_cli.py --operation create --file-size 4 "
             f"--files 1000 --top {nfs_mounting_dir}{subvolume1_path}",
@@ -144,11 +144,11 @@ def run(ceph_cluster, **kw):
             sudo=True,
             cmd=f"ceph fs subvolume getpath {fs_name} clone1 --group_name subvolume_group1",
         )
-        clone1_path = out.read().decode().rstrip()
+        clone1_path = out.rstrip()
         out, rc = client1.exec_command(
             sudo=True, cmd=f"ceph fs subvolume getpath {fs_name} clone2"
         )
-        clone2_path = out.read().decode().rstrip()
+        clone2_path = out.rstrip()
         commands = [
             f"diff -r {nfs_mounting_dir}{subvolume1_path} {nfs_mounting_dir}{subvolume1_path}/.snap/_snap1*",
             f"diff -r {nfs_mounting_dir}{subvolume2_path} {nfs_mounting_dir}{subvolume2_path}/.snap/_snap2*",

@@ -20,6 +20,7 @@ tests:
           copy_admin_key: true
           dashboard_enabled: false
       desc: test cluster setup using ceph-ansible
+      polarion-id: CEPH-83571467
       destroy-cluster: false
       abort-on-fail: true
 
@@ -30,6 +31,7 @@ tests:
         cmd: ceph -s
         sudo: True
       desc: Check for ceph health debug info
+      polarion-id: CEPH-83575200
 
   - test:
       name: S3CMD tests

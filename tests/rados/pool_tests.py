@@ -4,6 +4,7 @@ Tests included:
 1. Verification of EC pool recovery improvement
 2. Effect on size of pools with and without compression
 """
+
 import datetime
 import re
 import time
@@ -218,28 +219,67 @@ def run(ceph_cluster, **kw):
         log.info("Pool size is less when compression is enabled")
         return 0
 
-    if config.get("check_autoscaler_profile"):
+    if config.get("test_autoscaler_bulk_feature"):
         """
-        Verifies that the default auto-scaler profile on 5.1 builds in scale-up
-        Verifies bugs : 1. https://bugzilla.redhat.com/show_bug.cgi?id=2021738
+        Tests to verify the autoscaler bulk flag, which allows pools to make use of
+        scale-down profile, making those pools start with full compliments of PG sets.
+        Tests include
+        1. creating new pools with bulk,
+        2. enabling/disabling bulk flag on existing pools
+        3. Verify the PG changes when the flag is set/unset
+        Verifies bugs : https://bugzilla.redhat.com/show_bug.cgi?id=2049851
         """
-        build = config.get("build", config.get("rhbuild"))
-        autoscale_conf = config.get("check_autoscaler_profile")
-        regex = r"5.1-rhel-\d{1}"
-        if re.search(regex, build):
+        regex = r"\s*(\d.\d)-rhel-\d"
+        build = (re.search(regex, config.get("build", config.get("rhbuild")))).groups()[
+            0
+        ]
+        if not float(build) > 5.0:
             log.info(
-                "Test running on 5.1 builds, checking the default autoscaler profile"
+                "Test running on version less than 5.1, skipping verifying bulk flags"
             )
-            if not mon_obj.verify_set_config(**autoscale_conf):
-                log.error(
-                    f"The default value for autoscaler profile is not scale-up in buld {build}"
-                )
-                return 1
-            log.info(f"Autoscale profile is scale-up in release : {build}")
-        else:
-            log.debug(
-                f"The profile is already scale-up by default in release : {build}"
-            )
+            return 0
+
+        # Creating a pool with bulk feature
+        pool_name = config.get("pool_name")
+        if not pool_obj.set_bulk_flag(pool_name=pool_name):
+            log.error("Failed to create a pool with bulk features")
+            return 1
+
+        # Checking the autoscaler status, final PG counts, bulk flags
+        pg_target_init = pool_obj.get_target_pg_num_bulk_flag(pool_name=pool_name)
+
+        # Unsetting the bulk flag and checking the change in the PG counts
+        if not pool_obj.rm_bulk_flag(pool_name=pool_name):
+            log.error("Failed to create a pool with bulk features")
+            return 1
+
+        # Sleeping for 5 seconds for new PG num to bets et
+        time.sleep(5)
+        pg_target_interim = pool_obj.get_target_pg_num_bulk_flag(pool_name=pool_name)
+
+        # The target PG's once the flag is disabled must be lesser than when enabled
+        if pg_target_interim >= pg_target_init:
+            log.error("PG's not reduced after bulk flag disabled")
+            return 1
+
+        # Setting the bulk flag on pool again and checking the change in the PG counts
+        if not pool_obj.set_bulk_flag(pool_name=pool_name):
+            log.error("Failed to disable/remove bulk features on pool")
+            return 1
+
+        # Sleeping for 5 seconds for new PG num to bets et
+        time.sleep(5)
+
+        pg_target_final = pool_obj.get_target_pg_num_bulk_flag(pool_name=pool_name)
+
+        # The target PG's once the flag is disabled must be lesser than when enabled
+        if pg_target_interim >= pg_target_final:
+            log.error("PG's not Increased after bulk flag Enabled")
+            return 1
+
+        if config.get("delete_pool"):
+            rados_obj.detete_pool(pool=pool_name)
+        log.info("Verified the workings of bulk flag")
         return 0
 
     if config.get("verify_pool_target_ratio"):
@@ -360,4 +400,55 @@ def run(ceph_cluster, **kw):
                 rados_obj.detete_pool(pool=entry["pool_name"])
             log.info(f"Completed the test of pg_min_num on pool: {entry['pool_name']} ")
         log.info("pg_min_num tests completed")
+        return 0
+
+    if config.get("verify_pg_num_limit"):
+        """
+        This test is to verify the pg number limit for a pools.
+        Script cover the following steps-
+           1. Creating a pool with default pg number
+           2. set the Logs
+           3. Set noautoscale flag on
+           4. Set the debug_mgr to 10
+           5. Set the pg number more than the limit that is more than 128
+           6. Check the logs for the proper message
+        """
+        # enable the file logging
+        if not rados_obj.enable_file_logging():
+            log.error("Error while setting config to enable logging into file")
+            return 1
+        log.info("Logging to file configured")
+        pool_name = config.get("verify_pg_num_limit")["pool_name"]
+        rados_obj.create_pool(pool_name)
+
+        # Setting the no-autoscale flag
+        cmd = f'{"ceph osd pool set noautoscale"}'
+        rados_obj.run_ceph_command(cmd=cmd)
+
+        # setting the debug_mgr to 10
+        cmd = f'{"ceph tell mgr config set debug_mgr 10"}'
+        rados_obj.run_ceph_command(cmd=cmd)
+
+        # set the pg number more than 128
+        cmd = f"ceph osd pool set {pool_name} pg_num 256"
+        rados_obj.run_ceph_command(cmd=cmd)
+        time.sleep(10)
+        try:
+            # checking the logs
+            cmd = f'{"grep -rnw /var/log/ceph/ -e pg_num_actual"}'
+            cephadm.shell([cmd])
+        except Exception as err:
+            log.error(f'{"Logs are not generated with pg_num_actual"}')
+            log.error(err)
+            return 1
+        if config.get("delete_pool"):
+            rados_obj.detete_pool(pool=pool_name)
+
+            # Unsetting the no-autoscale flag
+            cmd = f'{"ceph osd pool unset noautoscale"}'
+            rados_obj.run_ceph_command(cmd=cmd)
+            # setting the debug_mgr to default
+            cmd = f'{"ceph tell mgr config set debug_mgr 2"}'
+            rados_obj.run_ceph_command(cmd=cmd)
+        log.info(" Verification of pg num checking completed")
         return 0

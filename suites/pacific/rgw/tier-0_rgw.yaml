@@ -66,6 +66,7 @@ tests:
           - ceph-common
         copy_admin_keyring: true
       desc: Configure the RGW client system
+      polarion-id: CEPH-83573758
       destroy-cluster: false
       module: test_client.py
       name: configure client
@@ -121,8 +122,3 @@ tests:
       module: sanity_rgw.py
       name: Swift based tests
       polarion-id: CEPH-11019
-
-  - test:
-      name: generate sosreport
-      module: sosreport.py
-      desc: generate sosreport

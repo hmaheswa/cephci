@@ -79,6 +79,7 @@ tests:
                   osd_pool_default_pgp_num: 64
                   mon_max_pg_per_osd: 1024
       desc: setup multisite cluster using ceph-ansible
+      polarion-id: CEPH-83575224
       abort-on-fail: true
 
   # Test work flow
@@ -95,6 +96,7 @@ tests:
       desc: create non-tenanted user
       module: sanity_rgw_multisite.py
       name: create user
+      polarion-id: CEPH-83575199
 
   - test:
       clusters:
@@ -157,7 +159,7 @@ tests:
   - test:
       name: Buckets and Objects test
       desc: test_Mbuckets_with_Nobjects_enc on secondary
-      polarion-id: CEPH-11358,CEPH-11361
+      polarion-id: CEPH-11358 # also applies to CEPH-11361
       module: sanity_rgw_multisite.py
       clusters:
         ceph-rgw2:
@@ -296,7 +298,7 @@ tests:
   - test:
       name: Buckets Versioning test
       desc: test_versioning_objects_copy on secondary
-      polarion-id: CEPH-14264, CEPH-10646
+      polarion-id: CEPH-14264 # also applies to CEPH-10646
       module: sanity_rgw_multisite.py
       clusters:
         ceph-rgw2:
@@ -318,7 +320,7 @@ tests:
   - test:
       name: Buckets Versioning test
       desc: test_versioning_objects_enable on secondary
-      polarion-id: CEPH-14261, CEPH-9222, CEPH-10652
+      polarion-id: CEPH-14261 # also applies to CEPH-9222 and CEPH-10652
       module: sanity_rgw_multisite.py
       clusters:
         ceph-rgw2:
@@ -354,6 +356,7 @@ tests:
   - test:
       name: create user
       desc: create tenanted user
+      polarion-id: CEPH-83575199
       module: sanity_rgw_multisite.py
       clusters:
         ceph-rgw1:

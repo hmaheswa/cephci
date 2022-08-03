@@ -26,13 +26,16 @@ class CephBaremetalNode:
             root_login
             volumes
             subnet
+            Id
+            location
         """
         # CephVM attributes
         self._roles: list = list()
-
         self.osd_scenario: Optional[int] = None
         self.keypair: Optional[str] = None
+
         self.params = params
+        self.location = params.get("location")
         self.private_key = params.get("root_private_key")
         if self.private_key:
             self.private_key = expanduser(self.private_key)
@@ -59,7 +62,7 @@ class CephBaremetalNode:
                 command="id -u cephuser",
             )
 
-            if err.read().decode():
+            if err:
                 self._create_user(name="cephuser")
             else:
                 LOG.debug("Reusing existing user account of cephuser.")
@@ -144,3 +147,8 @@ class CephBaremetalNode:
     def shortname(self) -> str:
         """Return the shortform of the hostname."""
         return self.hostname.split(".")[0]
+
+    @property
+    def id(self) -> int:
+        """Return the node id."""
+        return self.params.get("id")

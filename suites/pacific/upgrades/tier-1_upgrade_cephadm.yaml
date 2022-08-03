@@ -37,7 +37,7 @@ tests:
       name: Cluster deployment
       desc: Cluster deployment with latest released version of 5.x
       module: test_cephadm.py
-      polarion-id: CEPH-83573791,CEPH-83574413
+      polarion-id: CEPH-83573791
       config:
         verify_cluster_health: true
         steps:
@@ -178,7 +178,7 @@ tests:
       destroy-cluster: false
       abort-on-fail: true
   - test:
-      name: Parallel run
+      name: Upgrade along with IOs
       module: test_parallel.py
       parallel:
         - test:
@@ -213,8 +213,8 @@ tests:
                 duration: 10
               verify_cluster_health: true
             destroy-cluster: false
-            abort-on-fail: true
       desc: Running upgrade and i/o's parallelly
+      abort-on-fail: true
   - test:
       name: Cephadm-ansible purge playbook
       desc: purge cephadm cluster using cephadm-purge-cluster.yml playbook

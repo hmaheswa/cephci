@@ -49,6 +49,7 @@ tests:
         cmd: ceph -s
         sudo: true
       desc: Check for ceph health debug info
+      polarion-id: CEPH-83575200
 
   - test:
       name: Beast SSL RGW test
@@ -86,6 +87,7 @@ tests:
   - test:
       name: Mbuckets_with_Nobjects
       desc: test to create "M" buckets and "N" objects with encryption
+      polarion-id: CEPH-11350
       module: sanity_rgw.py
       config:
         script-name: test_Mbuckets_with_Nobjects.py
@@ -127,7 +129,7 @@ tests:
   - test:
       name: Object Encryption Tests
       desc: Upload and Download objects using encryption [AES256 alogorithm]
-      polarion-id: CEPH-11358,CEPH-11361
+      polarion-id: CEPH-11358 # also applies to CEPH-11361
       module: sanity_rgw.py
       config:
         script-name: test_Mbuckets_with_Nobjects.py

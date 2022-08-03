@@ -1,5 +1,6 @@
 #############################################################################
 # - Automation support for upgrade from RHCS4 to RHCS5 cluster with RGW tests
+# with dashboard enabled
 #
 # Test steps:
 # ---------------------------------------------------------------------
@@ -26,6 +27,9 @@ tests:
       ansi_config:
         ceph_origin: repository
         ceph_repository: rhcs
+        ceph_repository_type: cdn
+        ceph_rhcs_version: 4
+        ceph_stable_release: nautilus
         osd_scenario: lvm
         osd_auto_discovery: false
         ceph_stable_rh_storage: true
@@ -55,6 +59,7 @@ tests:
         - "ceph versions"
       sudo: true
     desc: check for ceph status and version
+    polarion-id: CEPH-83575200
 
 
 # Basic Bucket Operation Tests
@@ -80,6 +85,7 @@ tests:
 - test:
     name: Mbuckets_with_Nobjects
     desc: test to create "M" no of buckets and "N" no of objects with encryption
+    polarion-id: CEPH-11350
     module: sanity_rgw.py
     config:
       script-name: test_Mbuckets_with_Nobjects.py
@@ -113,6 +119,15 @@ tests:
       config-file-name: test_Mbuckets_with_Nobjects_sharding.yaml
       timeout: 300
 
+- test:
+      name: Mbuckets_with_Nobjects with etag verification
+      desc: test etag verification
+      module: sanity_rgw.py
+      polarion-id: CEPH-83574871
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects_etag.yaml
+        timeout: 300
 
 # Bucket Listing Tests
 - test:
@@ -196,7 +211,7 @@ tests:
 # resharding tests
 - test:
     name: Resharding tests
-    desc: Reshading test - manual
+    desc: Resharding test - manual
     polarion-id: CEPH-83571740
     module: sanity_rgw.py
     config:
@@ -205,7 +220,7 @@ tests:
       timeout: 500
 - test:
     name: Resharding tests
-    desc: Reshading test - dynamic
+    desc: Resharding test - dynamic
     polarion-id: CEPH-83571740
     module: sanity_rgw.py
     config:
@@ -213,6 +228,25 @@ tests:
       config-file-name: test_dynamic_resharding.yaml
       timeout: 500
 
+- test:
+    name: DBR tests with custom objs_per_shard and max_dynamic_shard
+    desc: Resharding test - dynamic
+    polarion-id: CEPH-83575266
+    module: sanity_rgw.py
+    config:
+      script-name: test_dynamic_bucket_resharding.py
+      config-file-name: test_dbr_with_custom_objs_per_shard_and_max_dynamic_shard.yaml
+      timeout: 500
+
+- test:
+    name: DBR tests with custom objs_per_shard max_dynamic_shard and reshard_thread_interval
+    desc: Resharding test - dynamic
+    polarion-id: CEPH-83575267
+    module: sanity_rgw.py
+    config:
+      script-name: test_dynamic_bucket_resharding.py
+      config-file-name: test_dbr_with_custom_objs_per_shard_max_dynamic_shard_and_reshard_thread_interval.yaml
+      timeout: 500
 
 # switch from rpm to container
 - test:
@@ -232,8 +266,8 @@ tests:
         ceph_rhcs_version: 5
         osd_scenario: lvm
         osd_auto_discovery: false
-        fetch_directory: ~/fetch
         radosgw_num_instances: 2
+        fetch_directory: ~/fetch
         copy_admin_key: true
         containerized_deployment: true
         upgrade_ceph_packages: true
@@ -271,6 +305,7 @@ tests:
 - test:
     name: Mbuckets_with_Nobjects
     desc: test to create "M" no of buckets and "N" no of objects with encryption
+    polarion-id: CEPH-11350
     module: sanity_rgw.py
     config:
       script-name: test_Mbuckets_with_Nobjects.py
@@ -303,6 +338,16 @@ tests:
       script-name: test_Mbuckets_with_Nobjects.py
       config-file-name: test_Mbuckets_with_Nobjects_sharding.yaml
       timeout: 300
+
+- test:
+      name: Mbuckets_with_Nobjects with etag verification
+      desc: test etag verification
+      module: sanity_rgw.py
+      polarion-id: CEPH-83574871
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects_etag.yaml
+        timeout: 300
 
 # Bucket Listing Tests
 
@@ -387,7 +432,7 @@ tests:
 # resharding tests
 - test:
     name: Resharding tests
-    desc: Reshading test - manual
+    desc: Resharding test - manual
     polarion-id: CEPH-83571740
     module: sanity_rgw.py
     config:
@@ -396,10 +441,30 @@ tests:
       timeout: 500
 - test:
     name: Resharding tests
-    desc: Reshading test - dynamic
+    desc: Resharding test - dynamic
     polarion-id: CEPH-83571740
     module: sanity_rgw.py
     config:
       script-name: test_dynamic_bucket_resharding.py
       config-file-name: test_dynamic_resharding.yaml
+      timeout: 500
+
+- test:
+    name: DBR tests with custom objs_per_shard and max_dynamic_shard
+    desc: Resharding test - dynamic
+    polarion-id: CEPH-83575266
+    module: sanity_rgw.py
+    config:
+      script-name: test_dynamic_bucket_resharding.py
+      config-file-name: test_dbr_with_custom_objs_per_shard_and_max_dynamic_shard.yaml
+      timeout: 500
+
+- test:
+    name: DBR tests with custom objs_per_shard max_dynamic_shard and reshard_thread_interval
+    desc: Resharding test - dynamic
+    polarion-id: CEPH-83575267
+    module: sanity_rgw.py
+    config:
+      script-name: test_dynamic_bucket_resharding.py
+      config-file-name: test_dbr_with_custom_objs_per_shard_max_dynamic_shard_and_reshard_thread_interval.yaml
       timeout: 500

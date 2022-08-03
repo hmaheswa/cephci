@@ -1,6 +1,11 @@
-def nodeName = "centos-7"
+// Workflow to execute tests
 def sharedLib
 def retVal
+def run_type = "RHCEPH-test-executor run"
+def rhcephVersion= "${params.RHCS_Build}"
+def phase = "${params.Build}"
+def group = "${params.Group}-"
+def suite = "${params.Suite}"
 
 def getCLI(){
     /*
@@ -74,7 +79,7 @@ def buildArtifactDetails(def sharedLib){
     return artifactDetails
 }
 
-node(nodeName){
+node("rhel-8-medium || ceph-qe-ci"){
     stage('Install pre req') {
         if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
         checkout([
@@ -94,7 +99,7 @@ node(nodeName){
                 url: "${params.Git_Repo}"
             ]]
         ])
-        sharedLib = load("${env.WORKSPACE}/pipeline/vars/lib.groovy")
+        sharedLib = load("${env.WORKSPACE}/pipeline/vars/v3.groovy")
         if(params.Destroy_Cluster != 'Destroy always'){
             sharedLib.prepareNode(0,"ceph-ci")
         }
@@ -115,15 +120,27 @@ node(nodeName){
             }
             def cli = getCLI()
             retVal = sharedLib.executeTestSuite(cli, cleanupOnSuccess, cleanupOnFailure)
+            retVal.put("status", retVal["result"])
+            println(retVal)
         }
     }
     stage('Publish Results'){
-        testResults = ["${params.Suite}": retVal["result"]]
+        testResults = ["${params.Suite}" : retVal]
         def jobUserId
         wrap([$class: 'BuildUser']) {
             jobUserId = "${BUILD_USER_ID}@redhat.com"
+            jobUserName = "${BUILD_USER_FIRST_NAME}"
         }
-        def artifactDetails = buildArtifactDetails(sharedLib)
-        sharedLib.sendEmail(testResults, artifactDetails, "Async-${params.Group}", jobUserId)
+        def (majorVersion, minorVersion) = rhcephVersion.tokenize(".")
+        def releaseContent = sharedLib.readFromReleaseFile(majorVersion, minorVersion, lockFlag=false)
+        sharedLib.sendEmail(
+                run_type,
+                testResults,
+                sharedLib.buildArtifactsDetails(releaseContent, rhcephVersion, phase),
+                group,
+                suite,
+                jobUserId
+        )
+        currentBuild.description = "Triggered by - ${jobUserName}"
     }
 }

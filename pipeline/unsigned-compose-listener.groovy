@@ -2,52 +2,46 @@
     Script that adds the unsigned RPM build url into the qe build information file.
 */
 // Global variables section
-def nodeName = "centos-7"
 def sharedLib
 def cephVersion
 def composeUrl
 def platform
 
 // Pipeline script entry point
-node(nodeName) {
+node("rhel-8-medium || ceph-qe-ci") {
     try {
-        timeout(unit: "MINUTES", time: 30) {
-            stage('Preparing') {
-                if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
-                checkout(
-                    scm: [
-                        $class: 'GitSCM',
-                        branches: [[name: 'origin/master']],
-                        extensions: [
-                            [
-                                $class: 'CleanBeforeCheckout',
-                                deleteUntrackedNestedRepositories: true
-                            ],
-                            [
-                                $class: 'WipeWorkspace'
-                            ],
-                            [
-                                $class: 'CloneOption',
-                                depth: 1,
-                                noTags: true,
-                                shallow: true,
-                                timeout: 10,
-                                reference: ''
-                            ]
-                        ],
-                        userRemoteConfigs: [[
-                            url: 'https://github.com/red-hat-storage/cephci.git'
-                        ]]
-                    ],
-                    changelog: false,
-                    poll: false
-                )
-                sharedLib = load("${env.WORKSPACE}/pipeline/vars/lib.groovy")
-                sharedLib.prepareNode()
-            }
+
+        stage('prepareNode') {
+            if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
+            checkout(
+                scm: [
+                    $class: 'GitSCM',
+                    branches: [[name: 'origin/master']],
+                    extensions: [[
+                        $class: 'CleanBeforeCheckout',
+                        deleteUntrackedNestedRepositories: true
+                    ], [
+                        $class: 'WipeWorkspace'
+                    ], [
+                        $class: 'CloneOption',
+                        depth: 1,
+                        noTags: true,
+                        shallow: true,
+                        timeout: 10,
+                        reference: ''
+                    ]],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/red-hat-storage/cephci.git'
+                    ]]
+                ],
+                changelog: false,
+                poll: false
+            )
+            sharedLib = load("${env.WORKSPACE}/pipeline/vars/v3.groovy")
+            sharedLib.prepareNode()
         }
 
-        stage('Updating') {
+        stage('updateRecipeFile') {
             echo "${params.CI_MESSAGE}"
 
             ciMsg = sharedLib.getCIMessageMap()
@@ -88,7 +82,7 @@ node(nodeName) {
 
         }
 
-        stage('Messaging') {
+        stage('postUMB') {
 
             def msgMap = [
                 "artifact": [
@@ -101,7 +95,7 @@ node(nodeName) {
                 ],
                 "contact":[
                     "name": "Downstream Ceph QE",
-                    "email": "ceph-qe@redhat.com"
+                    "email": "cephci@redhat.com"
                 ],
                 "build": [
                     "platform": platform,
@@ -133,7 +127,7 @@ node(nodeName) {
                 subject: "${subject}",
                 body: "${body}",
                 from: "cephci@redhat.com",
-                to: "ceph-qe@redhat.com"
+                to: "cephci@redhat.com"
             )
             subject += "\n Jenkins URL: ${env.BUILD_URL}"
             googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)

@@ -7,10 +7,11 @@
 #
 # The following tests are covered
 #   - CEPH-9230 - verification snap and clone on an imported image
+#   - CEPH-83573308, CEPH-83573307 - clones creation with v2clone format and deletion
 
 tests:
 
-  # Setup the cluster
+   #Setup the cluster
 
   - test:
       abort-on-fail: true
@@ -25,7 +26,6 @@ tests:
               command: bootstrap
               service: cephadm
               args:
-                registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
                 skip-monitoring-stack: true
@@ -67,6 +67,7 @@ tests:
         node: node6
         install_packages:
           - ceph-common
+          - fio
         copy_admin_keyring: true
       desc: Configure client node
       destroy-cluster: false
@@ -79,3 +80,26 @@ tests:
       module: rbd_snap_clone_imported_image.py
       name: snap and clone on imported image
       polarion-id: CEPH-9230
+
+  - test:
+      desc: Verify that clones creation and deletion of parent image with V2 enabled
+      destroy-cluster: false
+      module: rbd_clonev2.py
+      name: clones creation with v2clone format
+      polarion-id: CEPH-83573309
+
+  - test:
+      desc: Enable "rbd_move_to_trash_on_remove" config setting, delete images and check if they are moved to trash automatically
+      destroy-cluster: false
+      module: rbd_trash.py
+      name: Check trash if the deleted images are moved to trash automatically
+      polarion-id: CEPH-83573297
+
+  - test:
+      config:
+        branch: master
+        script_path: qa/workunits/rbd
+        script: krbd_rxbounce.sh
+      desc: Executig upstream RBD kernel exclusive scenarios
+      module: test_rbd.py
+      name: 8_rbd_krbd_rxbounce

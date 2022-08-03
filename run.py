@@ -1,9 +1,10 @@
 #!/usr/bin/env python
+
+# Allow parallelized behavior of gevent. It has to be the first line.
 from gevent import monkey
 
-from utility.log import Log
-
 monkey.patch_all()
+
 import datetime
 import importlib
 import json
@@ -15,6 +16,7 @@ import sys
 import textwrap
 import time
 import traceback
+from copy import deepcopy
 from getpass import getuser
 from typing import Optional
 
@@ -34,6 +36,8 @@ from ceph.utils import (
     create_ibmc_ceph_nodes,
 )
 from utility import sosreport
+from utility.config import TestMetaData
+from utility.log import Log
 from utility.polarion import post_to_polarion
 from utility.retry import retry
 from utility.utils import (
@@ -74,6 +78,7 @@ A simple test suite wrapper that executes tests based on yaml test configuration
         [--insecure-registry]
         [--post-results]
         [--report-portal]
+        [--upstream-build <upstream-build>]
         [--log-level <LEVEL>]
         [--log-dir  <directory-name>]
         [--instances-name <name>]
@@ -106,7 +111,10 @@ Options:
   --osp-cred <file>                 openstack credentials as separate file
   --rhbuild <1.3.0>                 ceph downstream version
                                     eg: 1.3.0, 2.0, 2.1 etc
-  --build <latest>                  eg: latest|tier-0|tier-1|tier-2|cvp|released
+  --build <latest>                  Type of build to be use for testing
+                                    eg: latest|tier-0|tier-1|tier-2|released|upstream
+                                    [default: released]
+  --upstream-build <upstream-build> eg: quincy|pacific
   --platform <rhel-8>               select platform version eg., rhel-8, rhel-7
   --rhs-ceph-repo <repo>            location of rhs-ceph repo
                                     Top level location of compose
@@ -150,17 +158,7 @@ Options:
   --skip-sos-report                 Enables to collect sos-report on test suite failures
                                     [default: false]
 """
-log = Log(__name__)
-root = logging.getLogger()
-root.setLevel(logging.INFO)
-
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-
-ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.ERROR)
-ch.setFormatter(formatter)
-root.addHandler(ch)
-
+log = Log()
 test_names = []
 
 
@@ -177,7 +175,7 @@ def create_nodes(
     rp_logger: Optional[ReportPortal] = None,
 ):
     """Creates the system under test environment."""
-    if report_portal_session:
+    if rp_logger:
         name = create_unique_test_name("ceph node creation", test_names)
         test_names.append(name)
         desc = "Ceph cluster preparation"
@@ -258,6 +256,13 @@ def create_nodes(
         cluster_name = cluster.get("ceph-cluster").get("name", "ceph")
         ceph_cluster_dict[cluster_name] = Ceph(cluster_name, ceph_nodes)
 
+        # Set the network attributes of the cluster
+        # ToDo: Support other providers like openstack and IBM-C
+        if "baremetal" in cloud_type:
+            ceph_cluster_dict[cluster_name].networks = deepcopy(
+                cluster.get("ceph-cluster", {}).get("networks", {})
+            )
+
     # TODO: refactor cluster dict to cluster list
     log.info("Done creating osp instances")
     log.info("Waiting for Floating IPs to be available")
@@ -269,10 +274,12 @@ def create_nodes(
             try:
                 instance.connect()
             except BaseException:
-                rp_logger.finish_test_item(status="FAILED")
+                if rp_logger:
+                    rp_logger.finish_test_item(status="FAILED")
                 raise
 
-    rp_logger.finish_test_item(status="PASSED")
+    if rp_logger:
+        rp_logger.finish_test_item(status="PASSED")
 
     return ceph_cluster_dict, clients
 
@@ -291,11 +298,13 @@ def print_results(tc):
             dur = str(test["duration"])
         else:
             dur = "0s"
+
         name = test["name"]
         desc = test["desc"] or "None"
         status = test["status"]
         comments = test["comments"]
         line = f"{name:<30.30s}   {desc:<60.60s}   {dur:<30s}   {status:<15s}   {comments:>15s}"
+
         print(line)
 
 
@@ -304,6 +313,7 @@ def load_file(file_name):
     file_path = os.path.abspath(file_name)
     with open(file_path, "r") as conf_:
         content = yaml.safe_load(conf_)
+
     return content
 
 
@@ -368,33 +378,37 @@ def run(args):
         glb_file = args["--cluster-conf"]
 
     # Deciders
-    reuse = args.get("--reuse", None)
-    cloud_type = args.get("--cloud", "openstack")
+    reuse = args.get("--reuse")
+    cloud_type = args.get("--cloud")
 
     # These are not mandatory options
     inventory_file = args.get("--inventory")
     osp_cred_file = args.get("--osp-cred")
 
     osp_cred = load_file(osp_cred_file) if osp_cred_file else dict()
-    cleanup_name = args.get("--cleanup", None)
+    cleanup_name = args.get("--cleanup")
 
-    ignore_latest_nightly_container = args.get("--ignore-latest-container", False)
+    ignore_latest_nightly_container = args.get("--ignore-latest-container")
 
     # Set log directory and get absolute path
     console_log_level = args.get("--log-level")
     log_directory = args.get("--log-dir")
+    post_to_report_portal = args.get("--report-portal")
 
     run_id = generate_unique_id(length=6)
+    rp_logger = None
+    if post_to_report_portal:
+        rp_logger = ReportPortal()
+
+    TestMetaData(run_id=run_id, rhbuild=rhbuild, rhcs="rhcs", rp_logger=rp_logger)
     run_dir = create_run_dir(run_id, log_directory)
     startup_log = os.path.join(run_dir, "startup.log")
 
     handler = logging.FileHandler(startup_log)
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(formatter)
-    root.addHandler(handler)
+    log.logger.addHandler(handler)
 
     if console_log_level:
-        ch.setLevel(logging.getLevelName(console_log_level.upper()))
+        log.logger.setLevel(console_log_level.upper())
 
     log.info(f"Startup log location: {startup_log}")
     run_start_time = datetime.datetime.now()
@@ -433,47 +447,43 @@ def run(args):
         raise Exception("Require system configuration information to provision.")
 
     platform = args["--platform"]
-    build = args.get("--build", None)
+    build = args.get("--build")
 
-    if build and build not in ["released"]:
+    if build and build not in ["released"] and not ignore_latest_nightly_container:
         base_url, docker_registry, docker_image, docker_tag = fetch_build_artifacts(
-            build, rhbuild, platform
+            build, rhbuild, platform, args.get("--upstream-build", None)
         )
 
-    store = args.get("--store", False)
+    store = args.get("--store") or False
 
     base_url = args.get("--rhs-ceph-repo") or base_url
     ubuntu_repo = args.get("--ubuntu-repo") or ubuntu_repo
     docker_registry = args.get("--docker-registry") or docker_registry
     docker_image = args.get("--docker-image") or docker_image
     docker_tag = args.get("--docker-tag") or docker_tag
-    kernel_repo = args.get("--kernel-repo", None)
+    kernel_repo = args.get("--kernel-repo")
 
-    docker_insecure_registry = args.get("--insecure-registry", False)
+    docker_insecure_registry = args.get("--insecure-registry")
 
     post_results = args.get("--post-results")
-    skip_setup = args.get("--skip-cluster", False)
-    skip_subscription = args.get("--skip-subscription", False)
-    post_to_report_portal = args.get("--report-portal", False)
-    rp_logger = ReportPortal()
-    # setting logger for ReportPortal
-    log.set_rp_logger(rp_logger)
+    skip_setup = args.get("--skip-cluster")
+    skip_subscription = args.get("--skip-subscription")
 
     instances_name = args.get("--instances-name")
     if instances_name:
         instances_name = instances_name.replace(".", "-")
 
     osp_image = args.get("--osp-image")
-    filestore = args.get("--filestore", False)
-    ec_pool_vals = args.get("--use-ec-pool", None)
-    skip_version_compare = args.get("--skip-version-compare", False)
+    filestore = args.get("--filestore")
+    ec_pool_vals = args.get("--use-ec-pool")
+    skip_version_compare = args.get("--skip-version-compare")
     custom_config = args.get("--custom-config")
     custom_config_file = args.get("--custom-config-file")
-    xunit_results = args.get("--xunit-results", False)
+    xunit_results = args.get("--xunit-results")
 
-    enable_eus = args.get("--enable-eus", False)
-    skip_enabling_rhel_rpms = args.get("--skip-enabling-rhel-rpms", False)
-    skip_sos_report = args.get("--skip-sos-report", False)
+    enable_eus = args.get("--enable-eus")
+    skip_enabling_rhel_rpms = args.get("--skip-enabling-rhel-rpms")
+    skip_sos_report = args.get("--skip-sos-report")
 
     # load config, suite and inventory yaml files
     conf = load_file(glb_file)
@@ -544,6 +554,8 @@ def run(args):
                 ceph_ansible_version.append(search_results.group(1))
 
     distro = ", ".join(list(set(distro)))
+    if not ceph_version and build == "upstream":
+        ceph_version.append(args.get("--upstream-build", None))
     ceph_version = ", ".join(list(set(ceph_version)))
     ceph_ansible_version = ", ".join(list(set(ceph_ansible_version)))
 
@@ -716,6 +728,7 @@ def run(args):
     tests = suite.get("tests")
     tcs = []
     jenkins_rc = 0
+    _rhcs_version = rhbuild[:3]
     # use ceph_test_data to pass around dynamic data between tests
     ceph_test_data = dict()
     ceph_test_data["custom-config"] = custom_config
@@ -732,7 +745,9 @@ def run(args):
         report_portal_description = tc["desc"] or ""
         unique_test_name = create_unique_test_name(tc["name"], test_names)
         test_names.append(unique_test_name)
+
         tc["log-link"] = configure_logger(unique_test_name, run_dir)
+
         mod_file_name = os.path.splitext(test_file)[0]
         test_mod = importlib.import_module(mod_file_name)
         print("\nRunning test: {test_name}".format(test_name=tc["name"]))
@@ -741,7 +756,6 @@ def run(args):
             print("Test logfile location: {log_url}".format(log_url=tc["log-link"]))
 
         log.info(f"Running test {test_file}")
-        # log.info("Running test %s", test_file)
         start = datetime.datetime.now()
 
         for cluster_name in test.get("clusters", ceph_cluster_dict):
@@ -810,6 +824,7 @@ def run(args):
             # if Kernel Repo is defined in ENV then set the value in config
             if os.environ.get("KERNEL-REPO-URL") is not None:
                 config["kernel-repo"] = os.environ.get("KERNEL-REPO-URL")
+
             try:
                 if post_to_report_portal:
                     rp_logger.start_test_item(
@@ -820,10 +835,9 @@ def run(args):
                     rp_logger.log(message=f"Logfile location - {tc['log-link']}")
                     rp_logger.log(message=f"Polarion ID: {tc['polarion-id']}")
 
-                # Initialize the cluster with the expected rhcs_version hence the
-                # precedence would be from test suite.
-                # rhbuild would start with the version for example 5.0 or 4.2-rhel-7
-                _rhcs_version = test.get("ceph_rhcs_version", rhbuild[:3])
+                if "build" in config.keys():
+                    _rhcs_version = config["build"]
+                # Initialize the cluster with the expected rhcs_version
                 ceph_cluster_dict[cluster_name].rhcs_version = _rhcs_version
 
                 rc = test_mod.run(
@@ -835,8 +849,8 @@ def run(args):
                     ceph_cluster_dict=ceph_cluster_dict,
                     clients=clients,
                 )
-            except BaseException:  # noqa
-                log.error(traceback.format_exc())
+            except BaseException as be:  # noqa
+                log.exception(be)
                 rc = 1
             finally:
                 collect_recipe(ceph_cluster_dict[cluster_name])
@@ -988,7 +1002,7 @@ def collect_recipe(ceph_cluster):
     out, rc = installer_node[0].exec_command(
         sudo=True, cmd="podman --version | awk {'print $3'}", check_ec=False
     )
-    output = out.read().decode().rstrip()
+    output = out.rstrip()
     if output:
         log.info(f"Podman Version {output}")
         version_datails["PODMAN"] = output
@@ -996,7 +1010,7 @@ def collect_recipe(ceph_cluster):
     out, rc = installer_node[0].exec_command(
         sudo=True, cmd="docker --version | awk {'print $3'}", check_ec=False
     )
-    output = out.read().decode().rstrip()
+    output = out.rstrip()
     if output:
         log.info(f"Docker Version {output}")
         version_datails["DOCKER"] = output
@@ -1005,7 +1019,7 @@ def collect_recipe(ceph_cluster):
         out, rc = client_node[0].exec_command(
             sudo=True, cmd="ceph --version | awk '{print $3}'", check_ec=False
         )
-        output = out.read().decode().rstrip()
+        output = out.rstrip()
         log.info(f"ceph Version {output}")
         version_datails["CEPH"] = output
 

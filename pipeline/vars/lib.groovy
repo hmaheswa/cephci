@@ -153,6 +153,7 @@ def fetchCephVersion(def baseUrl) {
     return cephVer[0]
 }
 
+
 def setLock(def majorVer, def minorVer) {
     /*
         create a lock file
@@ -183,6 +184,7 @@ def unSetLock(def majorVer, def minorVer) {
     def lockFile = "${defaultFileDir}/RHCEPH-${majorVer}.${minorVer}.lock"
     sh(script: "rm -f ${lockFile}")
 }
+
 
 def readFromReleaseFile(
     def majorVer,

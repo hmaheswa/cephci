@@ -117,9 +117,21 @@ def run(ceph_cluster, **kw):
     # Clone the repository once for the entire test suite
     pip_cmd = "venv/bin/pip"
     python_cmd = "venv/bin/python"
+    if ceph_cluster.rhcs_version.version[0] > 4:
+        setup_cluster_access(ceph_cluster, rgw_node)
+        rgw_node.exec_command(
+            sudo=True, cmd="yum install -y ceph-common --nogpgcheck", check_ec=False
+        )
+
+    if ceph_cluster.rhcs_version.version[0] in [3, 4]:
+        if ceph_cluster.containerized:
+            # install ceph-common on the host hosting the container
+            rgw_node.exec_command(
+                sudo=True, cmd="yum install -y ceph-common --nogpgcheck", check_ec=False
+            )
     out, err = rgw_node.exec_command(cmd="ls -l venv", check_ec=False)
 
-    if not out.read().decode():
+    if not out:
         rgw_node.exec_command(
             cmd="yum install python3 -y --nogpgcheck", check_ec=False, sudo=True
         )
@@ -130,19 +142,6 @@ def run(ceph_cluster, **kw):
             cmd=f"{pip_cmd} install "
             + f"-r {test_folder}/ceph-qe-scripts/rgw/requirements.txt"
         )
-
-        if ceph_cluster.rhcs_version.version[0] > 4:
-            setup_cluster_access(ceph_cluster, rgw_node)
-            rgw_node.exec_command(
-                sudo=True, cmd="yum install -y ceph-common --nogpgcheck"
-            )
-
-        if ceph_cluster.rhcs_version.version[0] in [3, 4]:
-            if ceph_cluster.containerized:
-                # install ceph-common on the host hosting the container
-                rgw_node.exec_command(
-                    sudo=True, cmd="yum install -y ceph-common --nogpgcheck"
-                )
 
     script_name = config.get("script-name")
     config_file_name = config.get("config-file-name")
@@ -159,7 +158,7 @@ def run(ceph_cluster, **kw):
         remote_fp.write(yaml.dump(test_config, default_flow_style=False))
 
     cmd_env = " ".join(config.get("env-vars", []))
-    out, err = rgw_node.exec_command(
+    test_status = rgw_node.exec_command(
         cmd=cmd_env
         + f"sudo {python_cmd} "
         + test_folder_path
@@ -169,10 +168,8 @@ def run(ceph_cluster, **kw):
         + test_folder
         + config_dir
         + config_file_name,
-        timeout=timeout,
+        long_running=True,
     )
-    log.info(out.read().decode())
-    log.error(err.read().decode())
 
     if run_io_verify:
         log.info("running io verify script")
@@ -180,7 +177,7 @@ def run(ceph_cluster, **kw):
             cmd=f"sudo {python_cmd} " + test_folder_path + lib_dir + "read_io_info.py",
             timeout=timeout,
         )
-        log.info(verify_out.read().decode())
-        log.error(verify_out.read().decode())
+        log.info(verify_out)
+        log.error(err)
 
-    return 0
+    return test_status

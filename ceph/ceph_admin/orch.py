@@ -63,8 +63,8 @@ class Orch(
         self,
         service_name: str = None,
         service_type: str = None,
-        timeout: int = 300,
-        interval: int = 5,
+        timeout: int = 1800,
+        interval: int = 20,
     ) -> bool:
         """
         Verify the provided service is running for the given list of ids.
@@ -91,6 +91,8 @@ class Orch(
         if service_type:
             check_status_dict["args"]["service_type"] = service_type
 
+        _retries = 3  # cross-verification retries
+        _count = 0
         while end_time > datetime.now():
             sleep(interval)
             out, err = self.ls(check_status_dict)
@@ -102,14 +104,23 @@ class Orch(
                 f"{running}/{count} {service_name if service_name else service_type} up... retrying"
             )
 
-            if count == running:
-                return True
+            if count + running < 1:
+                continue
+
+            if count == running and _count == count:
+                if _retries < 1:
+                    return True
+                _retries -= 1
+
+            if _count != count:
+                _count = count
+                _retries = 3
 
         # Identify the failure
         out, err = self.ls(check_status_dict)
         out = loads(out)
         LOG.error(
-            f"{service_name if service_name else service_type} failed with \n{out[0]['events']}"
+            f"{service_name if service_name else service_type} failed with \n{out[0].get('events')}"
         )
 
         return False
@@ -315,11 +326,19 @@ class Orch(
             return True
         elif op == "resume" and not loads(out)["paused"]:
             LOG.info("The orch operations are resumed")
+            LOG.info("The orch operations are resumed")
             return True
         return False
 
     def validate_spec_services(self, specs) -> None:
         LOG.info("Validating spec services")
         for spec in specs:
-            self.check_service_exists(service_type=spec["service_type"])
+            svc_type = spec["service_type"]
+            svc_id = spec.get("service_id")
+            if svc_id:
+                self.check_service_exists(
+                    service_name=f"{svc_type}.{spec['service_id']}"
+                )
+            else:
+                self.check_service_exists(service_type=spec["service_type"])
         return False

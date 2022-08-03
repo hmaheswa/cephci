@@ -96,6 +96,7 @@ tests:
       destroy-cluster: false
       module: test_cephadm.py
       name: deploy cluster
+      polarion-id: CEPH-83573713
 
   # Basic Bucket Operation Tests
 
@@ -110,12 +111,33 @@ tests:
         timeout: 300
 
   - test:
-      name: Mbuckets_with_Nobjects
-      desc: test to create "M" no of buckets and "N" no of objects with encryption
+      name: compresstion_with_zlib_type
+      desc: test compresstion with zlib type
+      polarion-id: CEPH-11350
       module: sanity_rgw.py
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_compression.yaml
+        timeout: 300
+
+  - test:
+      name: compresstion_with_zstd_type
+      desc: test compresstion with zstd type
+      polarion-id: CEPH-11350
+      module: sanity_rgw.py
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects_compression_zstd.yaml
+        timeout: 300
+
+  - test:
+      name: compresstion_with_snappy_type
+      desc: test compresstion with snappy type
+      polarion-id: CEPH-11350
+      module: sanity_rgw.py
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects_compression_snappy.yaml
         timeout: 300
 
   - test:
@@ -176,6 +198,7 @@ tests:
   - test:
       name: Test enable versioning
       desc: test to enable versioning
+      polarion-id: CEPH-10207
       module: sanity_rgw.py
       config:
         script-name: test_versioning_with_objects.py
@@ -215,6 +238,7 @@ tests:
   - test:
       name: Test suspension of versioning
       desc: test_versioning_suspend
+      polarion-id: CEPH-10209
       module: sanity_rgw.py
       config:
         script-name: test_versioning_with_objects.py
@@ -224,6 +248,7 @@ tests:
   - test:
       name: Test overwrite by another user of versioned objects
       desc: check to test to overwrite objects suspend from another user
+      polarion-id: CEPH-9199
       module: sanity_rgw.py
       config:
         script-name: test_versioning_with_objects.py
@@ -296,7 +321,7 @@ tests:
   - test:
       name: Bucket Lifecycle Object_expiration_tests
       desc: Test object expiration for versioned buckets with filter 'Prefix', test multiple rules.
-      polarion-id: CEPH-11177, CEPH-11182, CEPH-11188, CEPH-11187
+      polarion-id: CEPH-11177 # also applies to CEPH-11182, CEPH-11188 and CEPH-11187
       module: sanity_rgw.py
       config:
         script-name: test_bucket_lifecycle_object_expiration.py
@@ -368,7 +393,7 @@ tests:
   - test:
       name: Multi Tenancy Tests
       desc: User and container access in same and different tenants
-      polarion-id: CEPH-9740,CEPH-9741
+      polarion-id: CEPH-9740 # also applies to CEPH-9741
       module: sanity_rgw.py
       config:
         script-name: test_multitenant_user_access.py
@@ -451,7 +476,7 @@ tests:
   - test:
       name: Bucket Request Payer Tests
       desc: Basic test for bucket request payer
-      polarion-id: CEPH-10344,CEPH-10346,CEPH-10351
+      polarion-id: CEPH-10344 # also applies to CEPH-10346 and CEPH-10351
       module: sanity_rgw.py
       config:
         script-name: test_bucket_request_payer.py
@@ -471,7 +496,7 @@ tests:
   #resharding tests
   - test:
       name: Resharding tests
-      desc: Reshading test - manual
+      desc: Resharding test - manual
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
@@ -496,6 +521,7 @@ tests:
   - test:
       name: ACLs Test
       desc: Test basic acls
+      polarion-id: CEPH-14238 # also applies to CEPH-14239
       module: sanity_rgw.py
       config:
         test-version: v1
@@ -506,6 +532,7 @@ tests:
   - test:
       name: ACLs Test
       desc: Test acls on all users
+      polarion-id: CEPH-14240 # also applies to CEPH-14241
       module: sanity_rgw.py
       config:
         test-version: v1
@@ -516,6 +543,7 @@ tests:
   - test:
       name: ACLs Test
       desc: Test acls with copy objects on different users
+      polarion-id: CEPH-14242
       module: sanity_rgw.py
       config:
         test-version: v1
@@ -526,6 +554,7 @@ tests:
   - test:
       name: ACLs Test
       desc: Test acls reset
+      polarion-id: CEPH-14260
       module: sanity_rgw.py
       config:
         test-version: v1
@@ -538,6 +567,7 @@ tests:
   - test:
       name: ACLs Test
       desc: Test multipart upload->cancel->reupload
+      polarion-id: CEPH-14266
       module: sanity_rgw.py
       config:
         test-version: v1
@@ -549,6 +579,7 @@ tests:
 
   - test:
       name: User rename
+      polarion-id: CEPH-83574811
       desc: RGW User rename script
       module: sanity_rgw.py
       config:
@@ -634,6 +665,7 @@ tests:
       destroy-cluster: false
       module: test_client.py
       name: configure client
+      polarion-id: CEPH-83573758
 
   - test:
       abort-on-fail: false
@@ -643,13 +675,14 @@ tests:
       destroy-cluster: false
       module: test_s3.py
       name: execute s3tests
+      polarion-id: CEPH-83575225
 
   # Encryption tests
 
   - test:
       name: Object Encryption Tests
       desc: Upload and Download objects using encryption [AES256 alogorith]
-      polarion-id: CEPH-11358,CEPH-11361
+      polarion-id: CEPH-11358 # also applies to CEPH-11361
       module: sanity_rgw.py
       config:
         script-name: test_Mbuckets_with_Nobjects.py
@@ -662,7 +695,7 @@ tests:
       name: Indexless buckets
       desc: Indexless (blind) buckets
       comments: Known issue BZ-2043366
-      polarion-id: CEPH-10354, CEPH-10357
+      polarion-id: CEPH-10354 # also applies to CEPH-10357
       module: sanity_rgw.py
       config:
         test-version: v2

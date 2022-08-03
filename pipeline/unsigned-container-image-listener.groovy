@@ -2,7 +2,6 @@
     Script to update development RHCS container image information to QE build recipes.
 */
 // Global variables section
-def nodeName = "centos-7"
 def lib
 def versions
 def cephVersion
@@ -11,48 +10,42 @@ def releaseDetails = [:]
 
 // Pipeline script entry point
 
-node(nodeName) {
+node("rhel-8-medium || ceph-qe-ci") {
 
     try {
-        timeout(unit: "MINUTES", time: 30) {
-            stage('Preparing') {
-                if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
-                checkout(
-                    scm: [
-                        $class: 'GitSCM',
-                        branches: [[name: 'origin/master']],
-                        extensions: [
-                            [
-                                $class: 'CleanBeforeCheckout',
-                                deleteUntrackedNestedRepositories: true
-                            ],
-                            [
-                                $class: 'WipeWorkspace'
-                            ],
-                            [
-                                $class: 'CloneOption',
-                                depth: 1,
-                                noTags: true,
-                                shallow: true,
-                                timeout: 10,
-                                reference: ''
-                            ]
-                        ],
-                        userRemoteConfigs: [[
-                            url: 'https://github.com/red-hat-storage/cephci.git'
-                        ]]
-                    ],
-                    changelog: false,
-                    poll: false
-                )
+        stage('prepareNode') {
+            if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
+            checkout(
+                scm: [
+                    $class: 'GitSCM',
+                    branches: [[name: 'origin/master']],
+                    extensions: [[
+                        $class: 'CleanBeforeCheckout',
+                        deleteUntrackedNestedRepositories: true
+                    ], [
+                        $class: 'WipeWorkspace'
+                    ], [
+                        $class: 'CloneOption',
+                        depth: 1,
+                        noTags: true,
+                        shallow: true,
+                        timeout: 10,
+                        reference: ''
+                    ]],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/red-hat-storage/cephci.git'
+                    ]]
+                ],
+                changelog: false,
+                poll: false
+            )
 
-                // prepare the node
-                lib = load("${env.WORKSPACE}/pipeline/vars/lib.groovy")
-                lib.prepareNode(1)
-            }
+            // prepare the node
+            lib = load("${env.WORKSPACE}/pipeline/vars/v3.groovy")
+            lib.prepareNode(1)
         }
 
-        stage('Updating') {
+        stage('updateRecipeFile') {
             println "msg = ${params.CI_MESSAGE}"
 
             compose = lib.getCIMessageMap()
@@ -85,7 +78,7 @@ node(nodeName) {
 
         }
 
-        stage('Messaging') {
+        stage('postUMB') {
             def artifactsMap = [
                 "artifact": [
                     "type": "product-build",
@@ -97,7 +90,7 @@ node(nodeName) {
                 ],
                 "contact": [
                     "name": "Downstream Ceph QE",
-                    "email": "ceph-qe@redhat.com"
+                    "email": "cephci@redhat.com"
                 ],
                 "build": [
                     "repository": compose.repository,
@@ -137,7 +130,7 @@ node(nodeName) {
                 subject: "${subject}",
                 body: "${body}",
                 from: "cephci@redhat.com",
-                to: "ceph-qe@redhat.com"
+                to: "cephci@redhat.com"
             )
             subject += "\n Jenkins URL: ${env.BUILD_URL}"
             googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)

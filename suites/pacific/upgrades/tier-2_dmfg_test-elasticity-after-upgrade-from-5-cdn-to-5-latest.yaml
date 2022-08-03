@@ -190,10 +190,12 @@ tests:
           osd: "allow *"
           mds: "allow *"
           mgr: "allow *"
+        install_packages:
+          - ceph-common
       destroy-cluster: False
       abort-on-fail: True
   - test:
-      name: Parallel run
+      name: Upgrade along with IOs
       module: test_parallel.py
       parallel:
         - test:
@@ -226,8 +228,8 @@ tests:
                 duration: 10
               verify_cluster_health: True
             destroy-cluster: False
-            abort-on-fail: True
       desc: Running upgrade and i/o's parallelly
+      abort-on-fail: True
   - test:
       name: Add hosts to ceph cluster
       desc: Add host node(s) with IP address and labels

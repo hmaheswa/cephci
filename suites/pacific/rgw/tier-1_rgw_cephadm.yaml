@@ -88,6 +88,7 @@ tests:
                   nodes:
                     - node6
       desc: RHCS cluster deployment using cephadm.
+      polarion-id: CEPH-83573713
       destroy-cluster: false
       module: test_cephadm.py
       name: deploy cluster
@@ -102,6 +103,7 @@ tests:
           - ceph-common
         copy_admin_keyring: true
       desc: Configure the RGW client system
+      polarion-id: CEPH-83573758
       destroy-cluster: false
       module: test_client.py
       name: configure client

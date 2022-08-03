@@ -1,53 +1,54 @@
 /*
     Pipeline script for uploading IBM test run results to report portal.
 */
-
-def nodeName = "centos-7"
 def credsRpProc = [:]
 def sharedLib
 def rpPreprocDir
+def tierLevel = null
+def stageLevel = null
+def run_type = "Sanity Run"
+def build_url
 def reportBucket = "qe-ci-reports"
 def remoteName= "ibm-cos"
+def msgMap = [:]
 
-node(nodeName) {
+node("rhel-8-medium || ceph-qe-ci") {
 
     try {
-        timeout(unit: "MINUTES", time: 30) {
-            stage('prepareJenkinsAgent') {
-                if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
-                checkout(
-                    scm: [
-                        $class: 'GitSCM',
-                        branches: [[name: 'origin/master']],
-                        extensions: [
-                            [
-                                $class: 'CleanBeforeCheckout',
-                                deleteUntrackedNestedRepositories: true
-                            ],
-                            [
-                                $class: 'WipeWorkspace'
-                            ],
-                            [
-                                $class: 'CloneOption',
-                                depth: 1,
-                                noTags: true,
-                                shallow: true,
-                                timeout: 10,
-                                reference: ''
-                            ]
-                        ],
-                        userRemoteConfigs: [[
-                            url: 'https://github.com/red-hat-storage/cephci.git'
-                        ]]
-                    ],
-                    changelog: false,
-                    poll: false
-                )
 
-                // prepare the node
-                sharedLib = load("${env.WORKSPACE}/pipeline/vars/lib.groovy")
-                sharedLib.prepareNode()
-            }
+        stage('prepareJenkinsAgent') {
+            if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
+            checkout(
+                scm: [
+                    $class: 'GitSCM',
+                    branches: [[name: "origin/master"]],
+                    extensions: [[
+                        $class: 'CleanBeforeCheckout',
+                        deleteUntrackedNestedRepositories: true
+                    ], [
+                        $class: 'WipeWorkspace'
+                    ], [
+                        $class: 'CloneOption',
+                        depth: 1,
+                        noTags: true,
+                        shallow: true,
+                        timeout: 10,
+                        reference: ''
+                    ]],
+                    userRemoteConfigs: [[
+                        url: "https://github.com/red-hat-storage/cephci.git"
+                    ]]
+                ],
+                changelog: false,
+                poll: false
+            )
+
+            // prepare the node
+            sharedLib = load("${env.WORKSPACE}/pipeline/vars/v3.groovy")
+            msgMap = sharedLib.getCIMessageMap()
+            println("msgMap : ${msgMap}")
+            println("sharedLib: ${sharedLib}")
+            sharedLib.prepareNode(3)
         }
 
         stage('configureReportPortalWorkDir') {
@@ -55,7 +56,7 @@ node(nodeName) {
         }
 
         stage('uploadTestResult') {
-            def msgMap = sharedLib.getCIMessageMap()
+            msgMap = sharedLib.getCIMessageMap()
             def composeInfo = msgMap["recipe"]
 
             def resultDir = msgMap["test"]["object-prefix"]
@@ -80,56 +81,91 @@ node(nodeName) {
             }
 
             def testStatus = "ABORTED"
-
-            if (metaData["results"]) {
-                sharedLib.sendEmail(metaData["results"], metaData, metaData["stage"])
-                sharedLib.uploadTestResults(rpPreprocDir, credsRpProc, metaData)
-                testStatus = msgMap["test"]["result"]
+            /* Publish results through E-mail and Google Chat */
+            if(msgMap["pipeline"].containsKey("tags")){
+                def tag = msgMap["pipeline"]["tags"]
+                def tags_list = tag.split(',') as List
+                def stage_index = tags_list.findIndexOf { it ==~ /stage-\w+/ }
+                stageLevel = tags_list.get(stage_index)
+                def tier_index = tags_list.findIndexOf { it ==~ /tier-\w+/ }
+                tierLevel = tags_list.get(tier_index)
+                run_type = msgMap["pipeline"]["run_type"]
+                build_url = msgMap["run"]["url"]
             }
 
-            //Remove the sync results folder
+            if (metaData["results"]) {
+                if(!msgMap["pipeline"].containsKey("tags")){
+                    sharedLib.sendEmail(metaData["results"], metaData, metaData["stage"])
+                }
+                sharedLib.uploadTestResults(rpPreprocDir, credsRpProc, metaData)
+
+            }
+            testStatus = msgMap["test"]["result"]
+
+//             Remove the sync results folder
             sh script: "rclone purge ${remoteName}:${reportBucket}/${resultDir}"
 
-            // Update RH recipe file
-            if ( composeInfo != null && testStatus == "SUCCESS" ){
-                def tierLevel = msgMap["pipeline"]["name"]
+//             Update RH recipe file
+            if ( composeInfo != null){
+                if( run_type == "Sanity Run"){
+                    if ( tierLevel == null ){
+                        tierLevel = msgMap["pipeline"]["name"]
+                    }
+                    def rhcsVersion = sharedLib.getRHCSVersionFromArtifactsNvr()
+                    majorVersion = rhcsVersion["major_version"]
+                    minorVersion = rhcsVersion["minor_version"]
+                    minorVersion = "${minorVersion}"
+
+                    def latestContent = sharedLib.readFromReleaseFile(
+                            majorVersion, minorVersion
+                        )
+                    println("latestContentBefore: ${latestContent}")
+
+                    if ( latestContent.containsKey(tierLevel) ) {
+                        latestContent[tierLevel] = composeInfo
+                    }
+                    else {
+                        def updateContent = ["${tierLevel}": composeInfo]
+                        latestContent += updateContent
+                    }
+                    println("latestContent: ${latestContent}")
+                    sharedLib.writeToReleaseFile(majorVersion, minorVersion, latestContent)
+                }
+                sharedLib.writeToResultsFile(msgMap["artifact"]["version"], tierLevel, stageLevel, testStatus, run_type)
+            }
+            if(msgMap["pipeline"]["final_stage"] && tierLevel == "tier-2"){
                 def rhcsVersion = sharedLib.getRHCSVersionFromArtifactsNvr()
                 majorVersion = rhcsVersion["major_version"]
                 minorVersion = rhcsVersion["minor_version"]
-
-                def latestContent = sharedLib.readFromReleaseFile(
-                        majorVersion, minorVersion
-                    )
-
-                if ( latestContent.containsKey(tierLevel) ) {
-                    latestContent[tierLevel] = composeInfo
-                }
-                else {
-                    def updateContent = ["${tierLevel}": composeInfo]
-                    latestContent += updateContent
-                }
-                sharedLib.writeToReleaseFile(majorVersion, minorVersion, latestContent)
+                minorVersion = "${minorVersion}"
+                def testResults = sharedLib.readFromResultsFile(msgMap["artifact"]["version"])
+                sharedLib.updateConfluencePage(majorVersion, minorVersion, msgMap["artifact"]["version"], run_type, testResults)
+                sharedLib.sendConsolidatedEmail(run_type, testResults, metaData, majorVersion, minorVersion, msgMap["artifact"]["version"])
+                sharedLib.sendGChatNotification(run_type, metaData["results"], tierLevel, stageLevel, build_url)
             }
+            println("Execution complete")
         }
     } catch(Exception err) {
-        if (currentBuild.result != "ABORTED") {
-            // notify about failure
-            currentBuild.result = "FAILURE"
-            def failureReason = err.getMessage()
-            def subject =  "[CEPHCI-PIPELINE-ALERT] [JOB-FAILURE] - ${env.JOB_NAME}/${env.BUILD_NUMBER}"
-            def body = "<body><h3><u>Job Failure</u></h3></p>"
-            body += "<dl><dt>Jenkins Build:</dt><dd>${env.BUILD_URL}</dd>"
-            body += "<dt>Failure Reason:</dt><dd>${failureReason}</dd></dl></body>"
-
-            emailext (
-                mimeType: 'text/html',
-                subject: "${subject}",
-                body: "${body}",
-                from: "cephci@redhat.com",
-                to: "ceph-qe@redhat.com"
-            )
-            subject += "\n Jenkins URL: ${env.BUILD_URL}"
-            googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
+        if (currentBuild.result == "ABORTED") {
+            println("The workflow has been aborted.")
         }
+
+        // notify about failure
+        currentBuild.result = "FAILURE"
+        def failureReason = err.getMessage()
+        def subject =  "[CEPHCI-PIPELINE-ALERT] [JOB-FAILURE] - ${env.JOB_NAME}/${env.BUILD_NUMBER}"
+        def body = "<body><h3><u>Job Failure</u></h3></p>"
+        body += "<dl><dt>Jenkins Build:</dt><dd>${env.BUILD_URL}</dd>"
+        body += "<dt>Failure Reason:</dt><dd>${failureReason}</dd></dl></body>"
+
+        emailext (
+            mimeType: 'text/html',
+            subject: "${subject}",
+            body: "${body}",
+            from: "cephci@redhat.com",
+            to: "cephci@redhat.com"
+        )
+        subject += "\n Jenkins URL: ${env.BUILD_URL}"
+        googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
     }
 }

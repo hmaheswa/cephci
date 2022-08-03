@@ -60,6 +60,7 @@ tests:
                 placement:
                   label: rgw
       desc: bootstrap and deployment services with label placements.
+      polarion-id: CEPH-83573777
       destroy-cluster: false
       module: test_cephadm.py
       name: Deploy RHCS cluster using cephadm
@@ -77,6 +78,7 @@ tests:
       destroy-cluster: false
       module: test_client.py
       name: configure client
+      polarion-id: CEPH-83573758
 
 # Object download test
   - test:
@@ -90,8 +92,18 @@ tests:
       polarion-id: CEPH-14237
 
   - test:
+      name: Mbuckets_with_Nobjects with etag verification
+      desc: test etag verification
+      module: sanity_rgw.py
+      polarion-id: CEPH-83574871
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects_etag.yaml
+        timeout: 300
+
+  - test:
       name: Dynamic Resharding tests
-      desc: Reshading test - dynamic
+      desc: Resharding test - dynamic
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
@@ -101,7 +113,7 @@ tests:
 
   - test:
       name: Resharding tests
-      desc: Reshading test - manual
+      desc: Resharding test - manual
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
@@ -157,6 +169,7 @@ tests:
       desc: Retrieve the versions of the cluster
       module: exec.py
       name: post upgrade gather version
+      polarion-id: CEPH-83575200
       config:
         cephadm: true
         commands:
@@ -174,8 +187,18 @@ tests:
       polarion-id: CEPH-14237
 
   - test:
+      name: Mbuckets_with_Nobjects with etag verification
+      desc: test etag verification
+      module: sanity_rgw.py
+      polarion-id: CEPH-83574871
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects_etag.yaml
+        timeout: 300
+
+  - test:
       name: Dynamic Resharding tests
-      desc: Reshading test - dynamic
+      desc: Resharding test - dynamic
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
@@ -185,7 +208,7 @@ tests:
 
   - test:
       name: Resharding tests
-      desc: Reshading test - manual
+      desc: Resharding test - manual
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:

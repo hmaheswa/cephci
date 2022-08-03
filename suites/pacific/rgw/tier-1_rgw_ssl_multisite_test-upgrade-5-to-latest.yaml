@@ -124,6 +124,7 @@ tests:
       destroy-cluster: false
       module: test_cephadm.py
       name: deploy cluster
+      polarion-id: CEPH-83575222
 
   - test:
       abort-on-fail: true
@@ -148,6 +149,7 @@ tests:
       destroy-cluster: false
       module: test_client.py
       name: configure client
+      polarion-id: CEPH-83573758
 
   - test:
       abort-on-fail: true
@@ -214,6 +216,7 @@ tests:
       desc: Retrieve the configured environment details
       module: exec.py
       name: get shared realm info
+      polarion-id: CEPH-83575227
 
   - test:
       clusters:
@@ -227,6 +230,7 @@ tests:
       desc: create non-tenanted user
       module: sanity_rgw_multisite.py
       name: create user
+      polarion-id: CEPH-83575199
 
   # Baseline tests before upgrade
 
@@ -236,6 +240,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects
       module: sanity_rgw_multisite.py
@@ -248,6 +253,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects_multipart.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: test to create "M" buckets and "N" objects with multipart upload
       module: sanity_rgw_multisite.py
@@ -260,6 +266,7 @@ tests:
           config:
             script-name: test_swift_basic_ops.py
             config-file-name: test_swift_basic_ops.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: Test object operations with swift
       module: sanity_rgw_multisite.py
@@ -327,6 +334,7 @@ tests:
       desc: Retrieve the versions of the cluster
       module: exec.py
       name: post upgrade gather version
+      polarion-id: CEPH-83575200
 
   # Post upgrade testing
 
@@ -348,6 +356,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects_download.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects with download
       module: sanity_rgw_multisite.py
@@ -362,6 +371,7 @@ tests:
           config:
             script-name: test_swift_basic_ops.py
             config-file-name: test_swift_version_copy_op.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 500
       desc: test restoring of versioned objects in swift
       module: sanity_rgw_multisite.py
@@ -374,6 +384,7 @@ tests:
           config:
             script-name: test_swift_basic_ops.py
             config-file-name: test_swift_object_expire_op.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 500
       desc: test object expiration with swift
       module: sanity_rgw_multisite.py

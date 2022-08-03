@@ -3,8 +3,6 @@ import json
 import re
 from typing import Any, Tuple
 
-from paramiko.channel import ChannelFile
-
 from ceph.utils import get_node_by_id, translate_to_ip
 from utility.log import Log
 
@@ -29,9 +27,6 @@ def exec_command(node, **kwargs: Any) -> Tuple:
         CommandFailed   when there is an execution failure
     """
     out, err = node.exec_command(**kwargs)
-
-    out = out.read().decode() if isinstance(out, ChannelFile) else out
-    err = err.read().decode() if isinstance(err, ChannelFile) else err
     return out, err
 
 
@@ -139,6 +134,24 @@ def translate_to_daemon_id(node, string: str) -> str:
     return replaced_string
 
 
+def get_systemctl_service_name(node, service_name, command):
+    """
+    Return the systemctl service name matching the service_name parameter given.
+
+    Args:
+        node:       System to be used to gather the information.
+        service_name:     The string pattern to be used to match the service name.
+        command:        Command to be executed.
+
+    Return:
+        command after adding the service name.
+    """
+    cmd = f"systemctl list-units --type=service | grep ceph | grep {service_name}"
+    out, err = exec_command(node, sudo=True, cmd=cmd)
+    service_full_name = out.split()[0].strip()
+    return f"{command} {service_full_name}"
+
+
 def run(ceph_cluster, **kwargs: Any) -> int:
     """
     Test module for executing a sequence of commands using the CephAdm shell interface.
@@ -156,6 +169,7 @@ def run(ceph_cluster, **kwargs: Any) -> int:
                         commands        | List of commands to be executed
                         check_status    | Default True, if disabled does not raise error
                         role            | The role of the node to be used for exec
+                        service_name    | The service on which the given systemctl command needs to be executed
     Returns:
         0 - on success
         1 - on failure
@@ -180,8 +194,9 @@ def run(ceph_cluster, **kwargs: Any) -> int:
     LOG.info("Executing command")
     config = kwargs["config"]
     build = config.get("build", config.get("rhbuild"))
-
+    timeout = config.get("timeout")
     command = config.get("cmd")
+    service_name = config.get("service_name", "")
     LOG.warning("Usage of cmd is deprecated instead use commands.")
     commands = [command] if command else config["commands"]
     cephadm = config.get("cephadm", False)
@@ -212,6 +227,9 @@ def run(ceph_cluster, **kwargs: Any) -> int:
             cmd = translate_to_daemon_id(node, cmd)
             cmd = translate_to_service_name(node, cmd)
 
+        if "systemctl" in cmd:
+            cmd = get_systemctl_service_name(node, service_name, cmd)
+
         try:
             out, err = exec_command(
                 node,
@@ -219,6 +237,7 @@ def run(ceph_cluster, **kwargs: Any) -> int:
                 cmd=cmd,
                 check_ec=check_status,
                 long_running=long_running,
+                timeout=timeout,
             )
             LOG.info(out)
         except BaseException as be:

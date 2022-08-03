@@ -77,6 +77,7 @@ tests:
               rgw_pull_proto: http
               rgw_pull_port: 8080
       desc: Deploying Ceph multisite RGW cluster using ceph-ansible
+      polarion-id: CEPH-83574664
       module: test_ansible.py
       name: deploy ceph multisite cluster from cdn
 
@@ -91,6 +92,7 @@ tests:
             timeout: 300
       desc: create non-tenanted user
       module: sanity_rgw_multisite.py
+      polarion-id: CEPH-83575199
       name: create user
 
   # Baseline testing
@@ -101,6 +103,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects
       module: sanity_rgw_multisite.py
@@ -113,6 +116,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects_multipart.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: test to create "M" buckets and "N" objects with multipart upload
       module: sanity_rgw_multisite.py
@@ -125,6 +129,7 @@ tests:
           config:
             script-name: test_swift_basic_ops.py
             config-file-name: test_swift_basic_ops.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: Test object operations with swift
       module: sanity_rgw_multisite.py
@@ -163,6 +168,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_multisite_dynamic_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
             timeout: 300
       desc: Before upgrade create bucket and add objects for dynamic resharding brownfield scenario
       module: sanity_rgw_multisite.py
@@ -175,6 +181,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_multisite_manual_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
             timeout: 300
       desc: Before upgrade create bucket and add objects for manual resharding brownfield scenario
       module: sanity_rgw_multisite.py
@@ -267,6 +274,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects_download.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects with download
       module: sanity_rgw_multisite.py
@@ -281,6 +289,7 @@ tests:
           config:
             script-name: test_swift_basic_ops.py
             config-file-name: test_swift_version_copy_op.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 500
       desc: test restoring of versioned objects in swift
       module: sanity_rgw_multisite.py
@@ -293,6 +302,7 @@ tests:
           config:
             script-name: test_swift_basic_ops.py
             config-file-name: test_swift_object_expire_op.yaml
+            verify-io-on-site: ["ceph-sec"]
             timeout: 500
       desc: test object expiration with swift
       module: sanity_rgw_multisite.py
@@ -336,6 +346,7 @@ tests:
           config:
             script-name: test_check_sharding_enabled.py
             config-file-name: test_check_sharding_enabled_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
             timeout: 300
 
   - test:
@@ -344,6 +355,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_multisite_dynamic_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
             timeout: 300
       desc: Test dynamic resharding brownfield scenario after upgrade
       module: sanity_rgw_multisite.py
@@ -356,6 +368,7 @@ tests:
           config:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_multisite_manual_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
             timeout: 300
       desc: Test manual resharding brownfield scenario after upgrade
       module: sanity_rgw_multisite.py

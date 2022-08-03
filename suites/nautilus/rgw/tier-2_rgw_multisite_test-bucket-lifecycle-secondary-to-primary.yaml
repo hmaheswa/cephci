@@ -67,6 +67,7 @@ tests:
               rgw_pull_proto: http
               rgw_pull_port: 8080
       desc: setup multisite cluster using ceph-ansible
+      polarion-id: CEPH-83575224
       abort-on-fail: true
 
   # Test work flow
@@ -81,6 +82,7 @@ tests:
             copy-user-info-to-site: ceph-rgw2
             timeout: 300
       desc: create non-tenanted user
+      polarion-id: CEPH-83575199
       module: sanity_rgw_multisite.py
       name: create user
 
@@ -94,7 +96,7 @@ tests:
             verify-io-on-site: [ "ceph-rgw1" ]
       desc: test_lifecycle  on secondary with AND rule filter
       module: sanity_rgw_multisite.py
-      polarion-id: CEPH-11179, CEPH-11180
+      polarion-id: CEPH-11179 # also applies to CEPH-11180
       name: m buckets with n objects
   - test:
       name: Buckets and Objects test

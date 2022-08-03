@@ -2,6 +2,7 @@ import random
 import string
 import traceback
 
+from ceph.ceph import CommandFailed
 from tests.cephfs.cephfs_utilsV1 import FsUtils
 from utility.log import Log
 
@@ -36,9 +37,23 @@ def run(ceph_cluster, **kw):
             )
             return 1
         client1 = clients[0]
+        host_list = [
+            client1.node.hostname.replace("node7", "node2"),
+            client1.node.hostname.replace("node7", "node3"),
+        ]
+        hosts = " ".join(host_list)
+        fs_name = "cephfs_new"
         client1.exec_command(
-            sudo=True, cmd="ceph fs volume create cephfs_new", check_ec=False
+            sudo=True,
+            cmd=f"ceph fs volume create {fs_name} --placement='2 {hosts}'",
+            check_ec=False,
         )
+
+        for host in host_list:
+            if not fs_util.wait_for_mds_deamon(
+                client=client1, process_name=fs_name, host=host
+            ):
+                raise CommandFailed(f"Failed to start MDS on particular nodes {host}")
         total_fs = fs_util.get_fs_details(client1)
         if len(total_fs) < 2:
             log.error(
@@ -69,8 +84,7 @@ def run(ceph_cluster, **kw):
         )
         fs_util.reboot_node(client1)
         out, rc = client1.exec_command(cmd="mount")
-        mount_output = out.read().decode()
-        mount_output = mount_output.split()
+        mount_output = out.split()
         log.info("validate kernel mount:")
         assert kernel_mounting_dir_1.rstrip("/") in mount_output, "Kernel mount failed"
         assert kernel_mounting_dir_2.rstrip("/") in mount_output, "Kernel mount failed"
@@ -98,5 +112,5 @@ def run(ceph_cluster, **kw):
         for command in commands:
             client1.exec_command(sudo=True, cmd=command)
         client1.exec_command(
-            sudo=True, cmd="cp /etc/fstab.backup /etc/fstab", check_ec=False
+            sudo=True, cmd="mv /etc/fstab.backup /etc/fstab", check_ec=False
         )
