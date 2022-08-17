@@ -144,7 +144,7 @@ def run(**kw):
 
 
     verify_out, err = test_site_node.exec_command(
-        cmd="sudo python3 " + test_folder_path + lib_dir + "read_io_info.py",
+        cmd="sudo python3 " + test_folder_path + lib_dir + "read_io_info.py -c verify_io_on_other_site False",
         timeout=timeout,
     )
     log.info(verify_out)
@@ -166,7 +166,7 @@ def run(**kw):
                 )
 
             verify_out, err = verify_io_on_site_node.exec_command(
-                cmd="sudo python3 " + test_folder_path + lib_dir + "read_io_info.py",
+                cmd="sudo python3 " + test_folder_path + lib_dir + "read_io_info.py -c verify_io_on_other_site True",
                 timeout=timeout,
             )
             log.info(verify_out)
