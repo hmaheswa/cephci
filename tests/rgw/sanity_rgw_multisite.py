@@ -142,6 +142,14 @@ def run(**kw):
         )
         verify_sync_status(copy_user_to_site_node)
 
+
+    verify_out, err = test_site_node.exec_command(
+        cmd="sudo python3 " + test_folder_path + lib_dir + "read_io_info.py",
+        timeout=timeout,
+    )
+    log.info(verify_out)
+    log.error(err)
+
     verify_io_on_sites = config.get("verify-io-on-site", [])
     if verify_io_on_sites:
         io_info = home_dir_path + "io_info.yaml"
