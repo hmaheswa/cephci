@@ -1280,6 +1280,7 @@ def tfacon(launch_id):
     auth_token = tfacon_cfg.get("auth_token")
     platform_url = tfacon_cfg.get("platform_url")
     tfa_url = tfacon_cfg.get("tfa_url")
+    re_url = tfacon_cfg.get("re_url")
     connector_type = tfacon_cfg.get("connector_type")
     cmd = (
         f"~/.local/bin/tfacon run --auth-token {auth_token} "
@@ -1287,6 +1288,7 @@ def tfacon(launch_id):
         f"--platform-url {platform_url} "
         f"--project-name {project_name} "
         f"--tfa-url {tfa_url} "
+        f"--re-url {re_url} -r "
         f"--launch-id {launch_id}"
     )
     log.info(cmd)
@@ -1298,6 +1300,7 @@ def tfacon(launch_id):
         stderr=subprocess.PIPE,
     )
     result, result_err = p1.communicate()
+
     log.info(result.decode("utf-8"))
     if p1.returncode != 0:
         log.warning("Unable to get the TFA anaylsis for the results")
@@ -1453,3 +1456,26 @@ def run_fio(**kw):
     )
 
     return kw["client_node"].exec_command(cmd=cmd, long_running=long_running, sudo=sudo)
+
+
+def fetch_image_tag(rhbuild):
+    """Retrieves image tag from magna002.ceph.redhat.com.
+
+    Args:
+        rhbuild: build section to be fetched)
+    Returns:
+        image-tag
+    """
+    try:
+        recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
+        filename = f"RHCEPH-{rhbuild}.yaml"
+        url = f"{recipe_url}{filename}"
+        data = requests.get(url, verify=False)
+        yml_data = yaml.safe_load(data.text)
+        if "rc" in yml_data.keys():
+            container_image = yml_data["latest"]["repository"]
+            image_tag = container_image.split(":")[-1]
+            return image_tag
+        raise TestSetupFailure("Not a live testing")
+    except Exception as e:
+        raise TestSetupFailure(f"Could not fetch image tag : {e}")
