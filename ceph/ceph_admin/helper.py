@@ -1,13 +1,14 @@
 """
 Contains helper functions that can used across the module.
 """
-import datetime
 import json
 import os
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
+from distutils.version import LooseVersion
 from os.path import dirname
 from time import sleep
+from typing import Optional
 
 from jinja2 import Template
 
@@ -190,6 +191,10 @@ class GenerateServiceSpec:
                 if isinstance(labels, str) and labels == "apply-all-labels":
                     labels = self.get_labels(node)
                 host["labels"] = labels
+
+            if spec.get("location"):
+                host["location"] = spec["location"]
+
             hosts.append(host)
 
         return template.render(hosts=hosts)
@@ -770,8 +775,8 @@ def monitoring_file_existence(node, file_or_path, file_exist=True, timeout=180):
     Returns:
         boolean
     """
-    end_time = datetime.datetime.now() + timedelta(seconds=timeout)
-    while end_time > datetime.datetime.now():
+    end_time = datetime.now() + timedelta(seconds=timeout)
+    while end_time > datetime.now():
         if file_exist == file_or_path_exists(node, file_or_path):
             return True
         sleep(3)
@@ -824,3 +829,101 @@ def validate_log_file_after_enable(cls):
             return False
 
     return True
+
+
+def check_service_exists(
+    installer,
+    service_name: Optional[str] = None,
+    service_type: Optional[str] = None,
+    timeout: int = 1800,
+    interval: int = 20,
+    rhcs_version: Optional[LooseVersion] = None,
+) -> bool:
+    """
+    Verify the provided service is running for the given list of ids.
+
+    Args:
+        installer (CephNode): ceph installer node
+        service_name (str): The name of the service to be checked.
+        service_type (str): The type of the service to be checked.
+        timeout (int):  In seconds, the maximum allowed time (default=1800)
+        interval (int): In seconds, the polling interval time (default=20)
+        rhcs_version (LooseVersion):  RHCS version
+
+    Returns:
+        Boolean: True if the service and the list of daemons are running else False.
+
+    """
+    end_time = datetime.now() + timedelta(seconds=timeout)
+    cmd_args = ["cephadm", "shell", "--", "ceph", "orch", "ls"]
+    if service_name:
+        cmd_args += ["--service_name", service_name]
+
+    # Due to a BZ, the running field is always 0 for RGW daemon. This has been fixed in
+    # the later release.
+    if rhcs_version and rhcs_version == "5.0" and service_type == "rgw":
+        cmd_args += ["--format", "json", "--refresh"]
+    else:
+        cmd_args += ["--service_type", service_type, "--format", "json", "--refresh"]
+
+    _retries = 3  # cross-verification retries
+    _count = 0
+    while end_time > datetime.now():
+        sleep(interval)
+        out, err = installer.exec_command(
+            sudo=True, cmd=" ".join(cmd_args), check_ec=True
+        )
+        out = json.loads(out)[0]
+        running = out["status"]["running"]
+        count = out["status"]["size"]
+
+        LOG.info(f"{running}/{count} {service_name or service_type} up... retrying")
+
+        if count + running < 1:
+            continue
+
+        if count == running and _count == count:
+            if _retries < 1:
+                return True
+            _retries -= 1
+
+        if _count != count:
+            _count = count
+            _retries = 3
+
+    # Identify the failure
+    out, err = installer.exec_command(sudo=True, cmd=" ".join(cmd_args))
+    out = json.loads(out)
+    LOG.error(f"{service_name or service_type} failed with \n{out[0].get('events')}")
+    return False
+
+
+def validate_spec_services(installer, specs, rhcs_version) -> None:
+    """
+    This method ensures the services provided in the spec file are in running state.
+
+    Args:
+        installer       The node having cephadm package
+        specs           A list of CephAdm spec file
+        rhcs_version    The version of Ceph
+    """
+    LOG.info("Validating spec services")
+    for spec in specs:
+        svc_type = spec["service_type"]
+        svc_id = spec.get("service_id")
+        svc_name = None
+
+        # continue if it is host
+        if "host" == svc_type:
+            continue
+
+        if svc_id:
+            svc_name = f"{svc_type}.{spec['service_id']}"
+
+        if not check_service_exists(
+            installer=installer,
+            service_name=svc_name,
+            service_type=svc_type,
+            rhcs_version=rhcs_version,
+        ):
+            raise Exception(f"{svc_name or svc_type} service deployment failed!!!")

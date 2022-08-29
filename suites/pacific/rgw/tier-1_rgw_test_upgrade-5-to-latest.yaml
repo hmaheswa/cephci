@@ -88,11 +88,11 @@ tests:
         timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects with download
       module: sanity_rgw.py
-      name: download with M buckets with N objects
+      name: download objects pre upgrade
       polarion-id: CEPH-14237
 
   - test:
-      name: Mbuckets_with_Nobjects with etag verification
+      name: Mbuckets_with_Nobjects with etag verification pre upgrade
       desc: test etag verification
       module: sanity_rgw.py
       polarion-id: CEPH-83574871
@@ -102,23 +102,33 @@ tests:
         timeout: 300
 
   - test:
-      name: Dynamic Resharding tests
+      name: Dynamic Resharding tests pre upgrade
       desc: Resharding test - dynamic
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
         script-name: test_dynamic_bucket_resharding.py
-        config-file-name: test_dynamic_resharding.yaml
+        config-file-name: test_dynamic_resharding_without_bucket_delete.yaml
         timeout: 500
 
   - test:
-      name: Resharding tests
+      name: Manual Resharding tests pre upgrade
       desc: Resharding test - manual
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
         script-name: test_dynamic_bucket_resharding.py
-        config-file-name: test_manual_resharding.yaml
+        config-file-name: test_manual_resharding_without_bucket_delete.yaml
+        timeout: 500
+
+  - test:
+      name: Dynamic Resharding tests with version pre upgrade
+      desc: Resharding test - dynamic
+      polarion-id: CEPH-83571740
+      module: sanity_rgw.py
+      config:
+        script-name: test_dynamic_bucket_resharding.py
+        config-file-name: test_dynamic_resharding_with_version_without_bucket_delete.yaml
         timeout: 500
 
   - test:
@@ -128,7 +138,7 @@ tests:
         timeout: 300
       desc: test duration for ordered listing of bucket with top level objects
       module: sanity_rgw.py
-      name: ordered listing of buckets
+      name: ordered listing of buckets pre upgrade
       polarion-id: CEPH-83573545
 
   - test:
@@ -138,7 +148,7 @@ tests:
         timeout: 300
       desc: test duration for unordered listing of buckets with top level objects
       module: sanity_rgw.py
-      name: unordered listing of buckets
+      name: unordered listing of buckets pre upgrade
       polarion-id: CEPH-83573545
 
   - test:
@@ -148,8 +158,18 @@ tests:
         timeout: 300
       desc: Test object operations with swift
       module: sanity_rgw.py
-      name: swift basic operations
+      name: swift basic operations pre upgrade
       polarion-id: CEPH-11019
+
+  - test:
+      config:
+        script-name: test_bucket_listing.py
+        config-file-name: test_bucket_radoslist.yaml
+        timeout: 300
+      desc: Test bucket stats and radoslist on all buckets
+      module: sanity_rgw.py
+      name: test bucket stats and radoslist
+      polarion-id: CEPH-83574480
 
 # Perform upgrade
   - test:
@@ -183,11 +203,11 @@ tests:
         timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects with download
       module: sanity_rgw.py
-      name: download with M buckets with N objects
+      name: download objects post upgrade
       polarion-id: CEPH-14237
 
   - test:
-      name: Mbuckets_with_Nobjects with etag verification
+      name: Mbuckets_with_Nobjects with etag verification post upgrade
       desc: test etag verification
       module: sanity_rgw.py
       polarion-id: CEPH-83574871
@@ -197,23 +217,33 @@ tests:
         timeout: 300
 
   - test:
-      name: Dynamic Resharding tests
+      name: Dynamic Resharding tests post upgrade
       desc: Resharding test - dynamic
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
         script-name: test_dynamic_bucket_resharding.py
-        config-file-name: test_dynamic_resharding.yaml
+        config-file-name: test_dynamic_resharding_without_bucket_delete.yaml
         timeout: 500
 
   - test:
-      name: Resharding tests
+      name: Manual Resharding tests post upgrade
       desc: Resharding test - manual
       polarion-id: CEPH-83571740
       module: sanity_rgw.py
       config:
         script-name: test_dynamic_bucket_resharding.py
-        config-file-name: test_manual_resharding.yaml
+        config-file-name: test_manual_resharding_without_bucket_delete.yaml
+        timeout: 500
+
+  - test:
+      name: Dynamic Resharding tests with version post upgrade
+      desc: Resharding test - dynamic
+      polarion-id: CEPH-83571740
+      module: sanity_rgw.py
+      config:
+        script-name: test_dynamic_bucket_resharding.py
+        config-file-name: test_dynamic_resharding_with_version_without_bucket_delete.yaml
         timeout: 500
 
   - test:
@@ -223,7 +253,7 @@ tests:
         timeout: 300
       desc: test duration for ordered listing of bucket with top level objects
       module: sanity_rgw.py
-      name: ordered listing of buckets
+      name: ordered listing of buckets post upgrade
       polarion-id: CEPH-83573545
 
   - test:
@@ -233,7 +263,7 @@ tests:
         timeout: 300
       desc: test duration for unordered listing of buckets with top level objects
       module: sanity_rgw.py
-      name: unordered listing of buckets
+      name: unordered listing of buckets post upgrade
       polarion-id: CEPH-83573545
 
   - test:
@@ -243,5 +273,15 @@ tests:
         timeout: 300
       desc: Test object operations with swift
       module: sanity_rgw.py
-      name: swift basic operations
+      name: swift basic operations post upgrade
       polarion-id: CEPH-11019
+
+  - test:
+      config:
+        script-name: test_bucket_listing.py
+        config-file-name: test_bucket_radoslist.yaml
+        timeout: 300
+      desc: Test bucket stats and radoslist on all buckets
+      module: sanity_rgw.py
+      name: test bucket stats and radoslist
+      polarion-id: CEPH-83574480

@@ -129,8 +129,8 @@
     - stage-1
 
 - name: "Test multiple path upgrade to 5x latest"
-  suite: "suites/pacific/upgrades/tier-2_upgrade_test-multi-path-upgrade-to-5-latest.yaml"
-  global-conf: "conf/pacific/upgrades/tier-1_upgrade_cephadm.yaml"
+  suite: "suites/pacific/upgrades/tier-2_upgrade_test-multi-path-upgrade-to-5.2-latest.yaml"
+  global-conf: "conf/pacific/upgrades/5-0_upgrades.yaml"
   platform: "rhel-8"
   rhbuild: "5.2"
   inventory:
@@ -1016,7 +1016,7 @@
   suite: "suites/pacific/rgw/tier-1_rgw_test-lc-multiple-bucket.yaml"
   global-conf: "conf/pacific/rgw/tier-0_rgw.yaml"
   platform: "rhel-8"
-  rhbuild: "5.1"
+  rhbuild: "5.2"
   inventory:
     openstack: "conf/inventory/rhel-8-latest.yaml"
     ibmc: "conf/inventory/ibm-vpc-rhel-8-latest.yaml"
