@@ -3,74 +3,74 @@
 # ceph-rgw2 is slave/secondary site
 
 tests:
- - test:
-     name: pre-req
-     module: install_prereq.py
-     abort-on-fail: true
-     desc: install ceph pre requisites
- - test:
-     name: ceph ansible
-     module: test_ansible.py
-     clusters:
-       ceph-rgw1:
-         config:
-           ansi_config:
-             ceph_test: True
-             ceph_origin: distro
-             ceph_repository: rhcs
-             osd_scenario: lvm
-             osd_auto_discovery: False
-             journal_size: 1024
-             ceph_stable: True
-             ceph_stable_rh_storage: True
-             fetch_directory: ~/fetch
-             copy_admin_key: true
-             dashboard_enabled: False
-             rgw_multisite: true
-             rgw_zone: US_EAST
-             rgw_zonegroup: US
-             rgw_realm: USA
-             rgw_zonemaster: true
-             rgw_zonesecondary: false
-             rgw_zonegroupmaster: true
-             rgw_zone_user: synchronization-user
-             rgw_zone_user_display_name: "Synchronization User"
-             rgw_multisite_proto: "http"
-             system_access_key: 86nBoQOGpQgKxh4BLMyq
-             system_secret_key: NTnkbmkMuzPjgwsBpJ6o
-       ceph-rgw2:
-         config:
-           ansi_config:
-             ceph_test: True
-             ceph_origin: distro
-             ceph_repository: rhcs
-             osd_scenario: lvm
-             osd_auto_discovery: False
-             journal_size: 1024
-             ceph_stable: True
-             ceph_stable_rh_storage: True
-             fetch_directory: ~/fetch
-             copy_admin_key: true
-             dashboard_enabled: False
-             rgw_multisite: true
-             rgw_zone: US_WEST
-             rgw_zonegroup: US
-             rgw_realm: USA
-             rgw_zonemaster: false
-             rgw_zonesecondary: true
-             rgw_zonegroupmaster: false
-             rgw_zone_user: synchronization-user
-             rgw_zone_user_display_name: "Synchronization User"
-             system_access_key: 86nBoQOGpQgKxh4BLMyq
-             system_secret_key: NTnkbmkMuzPjgwsBpJ6o
-             rgw_multisite_proto: "http"
-             rgw_pull_proto: http
-             rgw_pull_port: 8080
-     desc: setup multisite cluster using ceph-ansible
-     polarion-id: CEPH-83575224
-     abort-on-fail: true
+  - test:
+      name: pre-req
+      module: install_prereq.py
+      abort-on-fail: true
+      desc: install ceph pre requisites
+  - test:
+      name: ceph ansible
+      module: test_ansible.py
+      clusters:
+        ceph-rgw1:
+          config:
+            ansi_config:
+              ceph_test: True
+              ceph_origin: distro
+              ceph_repository: rhcs
+              osd_scenario: lvm
+              osd_auto_discovery: False
+              journal_size: 1024
+              ceph_stable: True
+              ceph_stable_rh_storage: True
+              fetch_directory: ~/fetch
+              copy_admin_key: true
+              dashboard_enabled: False
+              rgw_multisite: true
+              rgw_zone: US_EAST
+              rgw_zonegroup: US
+              rgw_realm: USA
+              rgw_zonemaster: true
+              rgw_zonesecondary: false
+              rgw_zonegroupmaster: true
+              rgw_zone_user: synchronization-user
+              rgw_zone_user_display_name: "Synchronization User"
+              rgw_multisite_proto: "http"
+              system_access_key: 86nBoQOGpQgKxh4BLMyq
+              system_secret_key: NTnkbmkMuzPjgwsBpJ6o
+        ceph-rgw2:
+          config:
+            ansi_config:
+              ceph_test: True
+              ceph_origin: distro
+              ceph_repository: rhcs
+              osd_scenario: lvm
+              osd_auto_discovery: False
+              journal_size: 1024
+              ceph_stable: True
+              ceph_stable_rh_storage: True
+              fetch_directory: ~/fetch
+              copy_admin_key: true
+              dashboard_enabled: False
+              rgw_multisite: true
+              rgw_zone: US_WEST
+              rgw_zonegroup: US
+              rgw_realm: USA
+              rgw_zonemaster: false
+              rgw_zonesecondary: true
+              rgw_zonegroupmaster: false
+              rgw_zone_user: synchronization-user
+              rgw_zone_user_display_name: "Synchronization User"
+              system_access_key: 86nBoQOGpQgKxh4BLMyq
+              system_secret_key: NTnkbmkMuzPjgwsBpJ6o
+              rgw_multisite_proto: "http"
+              rgw_pull_proto: http
+              rgw_pull_port: 8080
+      desc: setup multisite cluster using ceph-ansible
+      polarion-id: CEPH-83575224
+      abort-on-fail: true
 
- # Test work flow
+  # Test work flow
 
   - test:
       clusters:
@@ -86,18 +86,18 @@ tests:
       module: sanity_rgw_multisite.py
       name: create user
 
- - test:
-     clusters:
-       ceph-rgw1:
-         config:
-           config-file-name: test_lc_rule_prefix_and_tag.yaml
-           script-name: test_bucket_lifecycle_object_expiration.py
-           timeout: 300
-           verify-io-on-site: [ "ceph-rgw2" ]
-     desc: test_lifecycle  on secondary with AND rule filter
-     module: sanity_rgw_multisite.py
-     polarion-id: CEPH-11179 # also applies to CEPH-11180
-     name: m buckets with n objects
+  - test:
+      clusters:
+        ceph-rgw1:
+          config:
+            config-file-name: test_lc_rule_prefix_and_tag.yaml
+            script-name: test_bucket_lifecycle_object_expiration.py
+            timeout: 300
+            verify-io-on-site: [ "ceph-rgw2" ]
+      desc: test_lifecycle  on secondary with AND rule filter
+      module: sanity_rgw_multisite.py
+      polarion-id: CEPH-11179 # also applies to CEPH-11180
+      name: m buckets with n objects
   - test:
       name: Buckets and Objects test
       desc: test_lifecycle  on secondary
@@ -107,6 +107,6 @@ tests:
         ceph-rgw1:
           config:
             script-name: test_bucket_lifecycle_object_expiration.py
-            verify-io-on-site: ["ceph-rgw2"]
+            verify-io-on-site: [ "ceph-rgw2" ]
             config-file-name: test_lc_rule_prefix_non_current_days.yaml
             timeout: 300
