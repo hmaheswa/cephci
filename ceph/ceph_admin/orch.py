@@ -7,12 +7,14 @@ from datetime import datetime, timedelta
 from json import loads
 from time import sleep
 
+from dateutil import parser
+
 from ceph.ceph import ResourceNotFoundError
 from utility.log import Log
 
 from .ceph import CephCLI
 from .common import config_dict_to_string
-from .helper import GenerateServiceSpec
+from .helper import GenerateServiceSpec, validate_spec_services
 from .ls import LSMixin
 from .pause import PauseMixin
 from .ps import PSMixin
@@ -58,72 +60,6 @@ class Orch(
         """
         out, _ = self.shell(args=["ceph", "orch", "host", "ls", "--format=json"])
         return [node for node in loads(out) if label in node.get("labels")]
-
-    def check_service_exists(
-        self,
-        service_name: str = None,
-        service_type: str = None,
-        timeout: int = 1800,
-        interval: int = 20,
-    ) -> bool:
-        """
-        Verify the provided service is running for the given list of ids.
-
-        Args:
-            service_name (Str): The name of the service to be checked.
-            service_type (Str): The type of the service to be checked.
-            timeout (Int):  In seconds, the maximum allowed time (default=300)
-            interval (int): In seconds, the polling interval time (default=5)
-
-        Returns:
-            Boolean: True if the service and the list of daemons are running else False.
-
-        """
-        end_time = datetime.now() + timedelta(seconds=timeout)
-        check_status_dict = {
-            "base_cmd_args": {"format": "json"},
-            "args": {"refresh": True},
-        }
-
-        if service_name:
-            check_status_dict["args"]["service_name"] = service_name
-
-        if service_type:
-            check_status_dict["args"]["service_type"] = service_type
-
-        _retries = 3  # cross-verification retries
-        _count = 0
-        while end_time > datetime.now():
-            sleep(interval)
-            out, err = self.ls(check_status_dict)
-            out = loads(out)[0]
-            running = out["status"]["running"]
-            count = out["status"]["size"]
-
-            LOG.info(
-                f"{running}/{count} {service_name if service_name else service_type} up... retrying"
-            )
-
-            if count + running < 1:
-                continue
-
-            if count == running and _count == count:
-                if _retries < 1:
-                    return True
-                _retries -= 1
-
-            if _count != count:
-                _count = count
-                _retries = 3
-
-        # Identify the failure
-        out, err = self.ls(check_status_dict)
-        out = loads(out)
-        LOG.error(
-            f"{service_name if service_name else service_type} failed with \n{out[0].get('events')}"
-        )
-
-        return False
 
     def get_role_service(self, service_name: str) -> str:
         """
@@ -179,6 +115,34 @@ class Orch(
 
         return False
 
+    def check_service_restart(
+        self,
+        service_name: str,
+        restart_init_time: datetime,
+    ) -> bool:
+        """
+        Checks whether the given service was restarted in the previous minute or any other amount of time as specified.
+        Args:
+            service_name (str): Name of the service
+            restart_init_time (datetime.datetime): Time at which restart was initiated
+
+        Returns:
+            True if the service was restarted within the given interval from now, else false
+        """
+        LOG.info("[%s] check for restart after: %s" % (service_name, restart_init_time))
+
+        out, err = self.ls({"base_cmd_args": {"format": "json"}})
+        out = loads(out)
+        service = [d for d in out if d.get("service_name") == service_name]
+
+        if service:
+            last_refresh = service[0]["status"]["last_refresh"]
+            last_refresh = parser.parse(last_refresh).replace(tzinfo=None)
+            if last_refresh >= restart_init_time:
+                return True
+
+        return False
+
     def apply_spec(self, config) -> None:
         """
         Execute the apply_spec method using the object's service name and provided input.
@@ -227,12 +191,15 @@ class Orch(
         )
 
         LOG.info(f"apply-spec command response :\n{out}")
-        # todo: add verification part
 
         # validate services
-        validate_spec_services = config.get("validate-spec-services")
-        if validate_spec_services:
-            self.validate_spec_services(specs=specs)
+        validate_spec_svcs = config.get("validate-spec-services")
+        if validate_spec_svcs:
+            validate_spec_services(
+                installer=self.installer,
+                specs=specs,
+                rhcs_version=self.cluster.rhcs_version,
+            )
             LOG.info("Validation of service created using a spec file is completed")
 
     def op(self, op, config):
@@ -328,17 +295,4 @@ class Orch(
             LOG.info("The orch operations are resumed")
             LOG.info("The orch operations are resumed")
             return True
-        return False
-
-    def validate_spec_services(self, specs) -> None:
-        LOG.info("Validating spec services")
-        for spec in specs:
-            svc_type = spec["service_type"]
-            svc_id = spec.get("service_id")
-            if svc_id:
-                self.check_service_exists(
-                    service_name=f"{svc_type}.{spec['service_id']}"
-                )
-            else:
-                self.check_service_exists(service_type=spec["service_type"])
         return False

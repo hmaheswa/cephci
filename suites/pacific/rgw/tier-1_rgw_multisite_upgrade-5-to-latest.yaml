@@ -216,7 +216,7 @@ tests:
             timeout: 300
       desc: create non-tenanted user
       module: sanity_rgw_multisite.py
-      name: create user
+      name: create non-tenanted user
       polarion-id: CEPH-83575199
 
   # Baseline tests before upgrade
@@ -231,7 +231,7 @@ tests:
             timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects with download
       module: sanity_rgw_multisite.py
-      name: download with M buckets with N objects
+      name: download objects pre upgrade
       polarion-id: CEPH-14237
 
   - test:
@@ -243,7 +243,7 @@ tests:
             timeout: 300
       desc: test duration for ordered listing of bucket with top level objects
       module: sanity_rgw_multisite.py
-      name: ordered listing of buckets
+      name: ordered listing of buckets pre upgrade
       polarion-id: CEPH-83573545
 
   - test:
@@ -255,7 +255,7 @@ tests:
             timeout: 300
       desc: test duration for unordered listing of buckets with top level objects
       module: sanity_rgw_multisite.py
-      name: unordered listing of buckets
+      name: unordered listing of buckets pre upgrade
       polarion-id: CEPH-83573545
 
   - test:
@@ -268,8 +268,34 @@ tests:
             timeout: 300
       desc: Test object operations with swift
       module: sanity_rgw_multisite.py
-      name: swift basic operations
+      name: swift basic operations pre upgrade
       polarion-id: CEPH-11019
+
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            config-file-name: test_multisite_dynamic_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+            timeout: 300
+      desc: Create bucket for Testing dynamic resharding brownfield scenario after upgrade
+      module: sanity_rgw_multisite.py
+      name: Create bucket for Testing dynamic resharding brownfield scenario after upgrade
+      polarion-id: CEPH-83574736
+
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            config-file-name: test_multisite_manual_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+            timeout: 300
+      desc: Create bucket for Testing manual resharding brownfield scenario after upgrade
+      module: sanity_rgw_multisite.py
+      name: Create bucket for Testing manual resharding brownfield scenario after upgrade
+      polarion-id: CEPH-83574735
 
   # Performing cluster upgrade
 
@@ -320,7 +346,7 @@ tests:
             timeout: 300
       desc: test to create "M" no of buckets and "N" no of objects with download
       module: sanity_rgw_multisite.py
-      name: download with M buckets with N objects
+      name: download objects post upgrade
       polarion-id: CEPH-14237
 
   - test:
@@ -332,7 +358,7 @@ tests:
             timeout: 300
       desc: test the duration for ordered listing of versioned buckets
       module: sanity_rgw_multisite.py
-      name: bucket Listing tests
+      name: ordered listing of versioned buckets post upgrade
       polarion-id: CEPH-83573545
 
   - test:
@@ -357,5 +383,73 @@ tests:
             timeout: 500
       desc: test object expiration with swift
       module: sanity_rgw_multisite.py
-      name: swift object expiration
+      name: swift object expiration post upgrade
       polarion-id: CEPH-9718
+
+  - test:
+      name: Verify DBR feature enabled on upgraded cluster
+      desc: Check DBR feature enabled on upgraded cluster
+      abort-on-fail: true
+      module: sanity_rgw_multisite.py
+      polarion-id: CEPH-83573596
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_check_sharding_enabled.py
+            config-file-name: test_check_sharding_enabled_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+            timeout: 300
+
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            config-file-name: test_multisite_dynamic_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+            timeout: 300
+      desc: Test dynamic resharding brownfield scenario after upgrade
+      module: sanity_rgw_multisite.py
+      name: Test dynamic resharding brownfield scenario after upgrade
+      polarion-id: CEPH-83574736
+
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            config-file-name: test_multisite_manual_resharding_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+            timeout: 300
+      desc: Test manual resharding brownfield scenario after upgrade
+      module: sanity_rgw_multisite.py
+      name: Test dynamic resharding brownfield scenario after upgrade
+      polarion-id: CEPH-83574735
+
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            config-file-name: test_multisite_dynamic_resharding_greenfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+            timeout: 300
+      desc: Test dynamic resharding brownfield scenario after upgrade on new bucket
+      abort-on-fail: true
+      module: sanity_rgw_multisite.py
+      name: Dynamic Resharding tests on Primary cluster
+      polarion-id: CEPH-83574737
+
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            config-file-name: test_multisite_manual_resharding_greenfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+            timeout: 300
+      desc: Test manual resharding brownfield scenario after upgrade on new bucket
+      abort-on-fail: true
+      module: sanity_rgw_multisite.py
+      name: Manual Resharding tests on Primary cluster
+      polarion-id: CEPH-83574734
