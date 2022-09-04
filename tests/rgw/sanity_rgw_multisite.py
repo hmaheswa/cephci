@@ -75,7 +75,7 @@ def run(**kw):
     config["git-url"] = config.get(
         "git-url", "https://github.com/hmaheswa/ceph-qe-scripts.git"
     )
-    config["branch"] = "verify_io"
+    config["branch"] = "lc_verify_io"
 
     set_env = config.get("set-env", False)
     primary_cluster = clusters.get("ceph-rgw1", clusters[list(clusters.keys())[0]])
