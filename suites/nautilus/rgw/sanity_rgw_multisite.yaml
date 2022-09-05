@@ -116,18 +116,18 @@ tests:
             script-name: user_create.py
             config-file-name: non_tenanted_user.yaml
             timeout: 300
-  - test:
-      name: Buckets and Objects test
-      desc: test_Mbuckets_with_Nobjects on secondary
-      polarion-id: CEPH-9789
-      module: sanity_rgw_multisite.py
-      clusters:
-        ceph-rgw1:
-          config:
-            script-name: test_Mbuckets_with_Nobjects.py
-            config-file-name: test_Mbuckets_with_Nobjects.yaml
-            verify-io-on-site: ["ceph-rgw2"]
-            timeout: 300
+  # - test:
+  #     name: Buckets and Objects test
+  #     desc: test_Mbuckets_with_Nobjects on secondary
+  #     polarion-id: CEPH-9789
+  #     module: sanity_rgw_multisite.py
+  #     clusters:
+  #       ceph-rgw1:
+  #         config:
+  #           script-name: test_Mbuckets_with_Nobjects.py
+  #           config-file-name: test_Mbuckets_with_Nobjects.yaml
+  #           verify-io-on-site: ["ceph-rgw2"]
+  #           timeout: 300
   # - test:
   #     name: Buckets and Objects test
   #     desc: test_Mbuckets_with_Nobjects_compression on secondary
@@ -290,52 +290,52 @@ tests:
   #           script-name: test_versioning_copy_objects.py
   #           config-file-name: test_versioning_copy_objects.yaml
   #           timeout: 300
-  # - test:
-  #     name: Buckets Versioning test
-  #     desc: test_versioning_enable on secondary
-  #     polarion-id: CEPH-9178
-  #     module: sanity_rgw_multisite.py
-  #     clusters:
-  #       ceph-rgw2:
-  #         config:
-  #           script-name: test_versioning_with_objects.py
-  #           config-file-name: test_versioning_enable.yaml
-  #           verify-io-on-site: ["ceph-rgw1"]
-  #           timeout: 300
-  # - test:
-  #     name: Buckets Versioning test
-  #     desc: test_versioning_objects_acls on secondary
-  #     polarion-id: CEPH-9190
-  #     module: sanity_rgw_multisite.py
-  #     clusters:
-  #       ceph-rgw2:
-  #         config:
-  #           script-name: test_versioning_with_objects.py
-  #           config-file-name: test_versioning_objects_acls.yaml
-  #           verify-io-on-site: ["ceph-rgw1"]
-  #           timeout: 300
-  # - test:
-  #     name: Buckets Versioning test
-  #     desc: test_versioning_objects_copy on secondary
-  #     polarion-id: CEPH-14264 # also applies to CEPH-10646
-  #     module: sanity_rgw_multisite.py
-  #     clusters:
-  #       ceph-rgw2:
-  #         config:
-  #           script-name: test_versioning_with_objects.py
-  #           config-file-name: test_versioning_objects_copy.yaml
-  #           timeout: 300
-  # - test:
-  #     name: Buckets Versioning test
-  #     desc: test_versioning_objects_delete on secondary
-  #     polarion-id: CEPH-14262
-  #     module: sanity_rgw_multisite.py
-  #     clusters:
-  #       ceph-rgw2:
-  #         config:
-  #           script-name: test_versioning_with_objects.py
-  #           config-file-name: test_versioning_objects_delete.yaml
-  #           timeout: 300
+  - test:
+      name: Buckets Versioning test
+      desc: test_versioning_enable on secondary
+      polarion-id: CEPH-9178
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-rgw2:
+          config:
+            script-name: test_versioning_with_objects.py
+            config-file-name: test_versioning_enable.yaml
+            verify-io-on-site: ["ceph-rgw1"]
+            timeout: 300
+  - test:
+      name: Buckets Versioning test
+      desc: test_versioning_objects_acls on secondary
+      polarion-id: CEPH-9190
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-rgw2:
+          config:
+            script-name: test_versioning_with_objects.py
+            config-file-name: test_versioning_objects_acls.yaml
+            verify-io-on-site: ["ceph-rgw1"]
+            timeout: 300
+  - test:
+      name: Buckets Versioning test
+      desc: test_versioning_objects_copy on secondary
+      polarion-id: CEPH-14264 # also applies to CEPH-10646
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-rgw2:
+          config:
+            script-name: test_versioning_with_objects.py
+            config-file-name: test_versioning_objects_copy.yaml
+            timeout: 300
+  - test:
+      name: Buckets Versioning test
+      desc: test_versioning_objects_delete on secondary
+      polarion-id: CEPH-14262
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-rgw2:
+          config:
+            script-name: test_versioning_with_objects.py
+            config-file-name: test_versioning_objects_delete.yaml
+            timeout: 300
   # - test:
   #     name: Buckets Versioning test
   #     desc: test_versioning_objects_enable on secondary
