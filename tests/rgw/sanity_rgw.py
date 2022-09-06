@@ -107,7 +107,7 @@ def run(ceph_cluster, **kw):
     config["git-url"] = config.get(
         "git-url", "https://github.com/hmaheswa/ceph-qe-scripts.git"
     )
-    config["branch"] = "log_error"
+    config["branch"] = "lc_verify_io"
 
     test_folder = "rgw-tests"
     test_folder_path = f"~/{test_folder}"
