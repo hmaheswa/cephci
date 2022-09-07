@@ -115,6 +115,24 @@ tests:
         script-name: test_dynamic_bucket_resharding.py
         config-file-name: test_manual_resharding.yaml
         timeout: 500
+  - test:
+      name: Dynamic Resharding tests version enabled
+      desc: Resharding test - dynamic version enabled
+      polarion-id: CEPH-83571740
+      module: sanity_rgw.py
+      config:
+        script-name: test_dynamic_bucket_resharding.py
+        config-file-name: test_dynamic_resharding_with_version.yaml
+        timeout: 500
+  - test:
+      name: Manual Resharding tests version enabled
+      desc: Resharding test - manual version enabled
+      polarion-id: CEPH-83571740
+      module: sanity_rgw.py
+      config:
+        script-name: test_dynamic_bucket_resharding.py
+        config-file-name: test_manual_resharding_with_version.yaml
+        timeout: 500
 #  - test:
 #      name: swift versioning tests
 #      desc: Test versioned object in swift
