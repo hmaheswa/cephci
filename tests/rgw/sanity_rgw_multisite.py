@@ -75,7 +75,7 @@ def run(**kw):
     config["git-url"] = config.get(
         "git-url", "https://github.com/hmaheswa/ceph-qe-scripts.git"
     )
-    config["branch"] = "quota"
+    config["branch"] = "set_bucket_deleted"
 
     set_env = config.get("set-env", False)
     primary_cluster = clusters.get("ceph-rgw1", clusters[list(clusters.keys())[0]])
