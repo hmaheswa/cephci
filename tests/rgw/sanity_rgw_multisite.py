@@ -73,8 +73,9 @@ def run(**kw):
     log.info(f"test site: {test_site.name}")
     test_site_node = test_site.get_ceph_object("rgw").node
     config["git-url"] = config.get(
-        "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
+        "git-url", "https://github.com/hmaheswa/ceph-qe-scripts.git"
     )
+    config["branch"] = "populate_io_info"
 
     set_env = config.get("set-env", False)
     primary_cluster = clusters.get("ceph-rgw1", clusters[list(clusters.keys())[0]])
