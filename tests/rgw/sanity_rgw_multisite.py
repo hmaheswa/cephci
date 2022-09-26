@@ -163,7 +163,7 @@ def run(**kw):
                     cmd="sudo python3 "
                     + test_folder_path
                     + lib_dir
-                    + "read_io_info.py",
+                    + f"read_io_info.py -c {config_file_name}",
                     timeout=timeout,
                 )
                 log.info(verify_out)

@@ -6,6 +6,7 @@ from ceph.ceph_admin.orch import Orch
 from ceph.parallel import parallel
 from ceph.utils import get_node_by_id
 from utility.log import Log
+from utility import utils
 
 log = Log(__name__)
 
