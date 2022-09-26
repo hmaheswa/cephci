@@ -1436,20 +1436,20 @@ def perform_env_setup(config, node, ceph_cluster):
     node.exec_command(cmd=f"sudo mkdir {config['test_folder']}")
     clone_the_repo(config, node, test_folder_path)
 
-    # if ceph_cluster.rhcs_version.version[0] > 4:
-    #     setup_cluster_access(ceph_cluster, node)
-    #     node.exec_command(
-    #         sudo=True, cmd="yum install -y ceph-common --nogpgcheck", check_ec=False
-    #     )
-    #
-    # if ceph_cluster.rhcs_version.version[0] in [3, 4]:
-    #     if ceph_cluster.containerized:
-    #         # install ceph-common on the host hosting the container
-    #         node.exec_command(
-    #             sudo=True,
-    #             cmd="yum install -y ceph-common --nogpgcheck",
-    #             check_ec=False,
-    #         )
+    if ceph_cluster.rhcs_version.version[0] > 4:
+        setup_cluster_access(ceph_cluster, node)
+        node.exec_command(
+            sudo=True, cmd="yum install -y ceph-common --nogpgcheck", check_ec=False
+        )
+
+    if ceph_cluster.rhcs_version.version[0] in [3, 4]:
+        if ceph_cluster.containerized:
+            # install ceph-common on the host hosting the container
+            node.exec_command(
+                sudo=True,
+                cmd="yum install -y ceph-common --nogpgcheck",
+                check_ec=False,
+            )
 
     out, err = node.exec_command(cmd="ls -l venv", check_ec=False)
 
