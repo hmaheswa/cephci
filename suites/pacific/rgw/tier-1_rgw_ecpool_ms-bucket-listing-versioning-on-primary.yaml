@@ -392,18 +392,18 @@ tests:
 #                  script-name: test_versioning_with_objects.py
 #                  config-file-name: test_versioning_objects_delete.yaml
 #                  timeout: 300
-        - test:
-            name: enabling bucket versioning and uploading objects on primary
-            desc: test_versioning_objects_enable on secondary
-            polarion-id: CEPH-14261 # also applies to CEPH-9222 and CEPH-10652
-            module: sanity_rgw_multisite.py
-            clusters:
-              ceph-pri:
-                config:
-                  script-name: test_versioning_with_objects.py
-                  config-file-name: test_versioning_objects_enable.yaml
-                  verify-io-on-site: ["ceph-sec"]
-                  timeout: 300
+#        - test:
+#            name: enabling bucket versioning and uploading objects on primary
+#            desc: test_versioning_objects_enable on secondary
+#            polarion-id: CEPH-14261 # also applies to CEPH-9222 and CEPH-10652
+#            module: sanity_rgw_multisite.py
+#            clusters:
+#              ceph-pri:
+#                config:
+#                  script-name: test_versioning_with_objects.py
+#                  config-file-name: test_versioning_objects_enable.yaml
+#                  verify-io-on-site: ["ceph-sec"]
+#                  timeout: 300
 #        - test:
 #            name: suspend bucket versioning on primary
 #            desc: test_versioning_objects_suspend on secondary
