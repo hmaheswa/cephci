@@ -66,22 +66,27 @@ def execute(test, args, results: dict):
     Returns:
         int: non-zero on failure, zero on pass
     """
-
+    final_result = 0
     test = test.get("test")
-    config = test.get("config", dict())
-    config.update(args["config"])
     file_name = test.get("module")
     mod_file_name = os.path.splitext(file_name)[0]
     test_mod = importlib.import_module(mod_file_name)
+    for cluster_name in test.get("clusters", args["ceph_cluster_dict"]):
+        if test.get("clusters"):
+            config = test.get("clusters").get(cluster_name).get("config", {})
+        else:
+            config = test.get("config", {})
+        config.update(args["config"])
 
-    rc = test_mod.run(
-        ceph_cluster=args["ceph_cluster"],
-        ceph_nodes=args["ceph_nodes"],
-        config=config,
-        test_data=args["test_data"],
-        ceph_cluster_dict=args["ceph_cluster_dict"],
-        clients=args["clients"],
-    )
-
+        rc = test_mod.run(
+            ceph_cluster=args["ceph_cluster"],
+            ceph_nodes=args["ceph_nodes"],
+            config=config,
+            test_data=args["test_data"],
+            ceph_cluster_dict=args["ceph_cluster_dict"],
+            clients=args["clients"],
+        )
+        if rc != 0 :
+            final_result = rc
     file_string = f"{test_mod}"
-    results.update({file_string: rc})
+    results.update({file_string: final_result})

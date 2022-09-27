@@ -1427,8 +1427,9 @@ def clone_the_repo(config, node, path_to_clone):
 
 def perform_env_setup(config, node, ceph_cluster):
     config["git-url"] = config.get(
-        "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
+        "git-url", "https://github.com/hmaheswa/ceph-qe-scripts.git"
     )
+    config["branch"] = "populate_io_info"
     config["test_folder"] = config.get("test_folder", "rgw-tests")
     test_folder_path = f"~/{config['test_folder']}"
     pip_cmd = "venv/bin/pip"
