@@ -45,7 +45,7 @@ Below configs are needed in order to run the tests
                                     - pkg1
                                     - pkg2
 """
-
+import os.path
 import time
 
 import yaml
@@ -147,7 +147,7 @@ def run(**kw):
 
         verify_io_on_sites = config.get("verify-io-on-site", [])
         if verify_io_on_sites:
-            io_info = home_dir_path + "io_info.yaml"
+            io_info = home_dir_path + f"io_info_{config_file_name}"
             for site in verify_io_on_sites:
                 verify_io_on_site_node = clusters.get(site).get_ceph_object("rgw").node
                 log.info(f"Check sync status on {site}")
