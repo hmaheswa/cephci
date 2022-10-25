@@ -30,6 +30,7 @@ tests:
                     mon-ip: node1
                     orphan-initial-daemons: true
                     initial-dashboard-password: admin@123
+                    skip-monitoring-stack: true
                     dashboard-password-noupdate: true
               - config:
                   command: add_hosts
@@ -74,6 +75,7 @@ tests:
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
+                    skip-monitoring-stack: true
                     initial-dashboard-password: admin@123
                     dashboard-password-noupdate: true
               - config:
