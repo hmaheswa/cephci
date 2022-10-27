@@ -1,0 +1,146 @@
+# Below are the multi-site test scenarios executed on the primary site with IO
+# version on the secondary site. The ceph clusters are named as
+#
+#   ceph-rgw1 is primary site
+#   ceph-rgw2 is secondary site
+#
+# These tests are executed in environment having the below configurations
+#
+#   - EC pool enabled on the data bucket
+#   - network delay applied on the clients and nodes with RGW roles.
+---
+
+tests:
+  - test:
+      name: pre-req
+      module: install_prereq.py
+      abort-on-fail: true
+      desc: install ceph pre requisites
+
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-rgw1:
+          config:
+            roles:
+              - rgw
+              - client
+            rule: root netem delay 10ms
+        ceph-rgw2:
+          config:
+            roles:
+              - rgw
+              - client
+            rule: root netem delay 10ms
+      desc: Configuring network traffic delay
+      polarion-id: CEPH-83575224
+      module: configure-tc.py
+      name: apply-net-qos
+
+  - test:
+      name: ceph ansible
+      module: test_ansible.py
+      clusters:
+        ceph-rgw1:
+          config:
+            ansi_config:
+              ceph_test: True
+              ceph_origin: distro
+              ceph_repository: rhcs
+              osd_scenario: lvm
+              osd_auto_discovery: False
+              journal_size: 1024
+              ceph_stable: True
+              ceph_stable_rh_storage: True
+              fetch_directory: ~/fetch
+              copy_admin_key: true
+              dashboard_enabled: true
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
+              rgw_multisite: true
+              rgw_zone: r1zone1
+              rgw_zonegroup: r1zonegroup
+              rgw_realm: realm1
+              rgw_zonemaster: true
+              rgw_zonesecondary: false
+              rgw_zonegroupmaster: true
+              rgw_zone_user: r1zoneuser1
+              rgw_zone_user_display_name: "r1zoneuser1"
+              rgw_multisite_proto: "http"
+              system_access_key: 86nBoQOGpQgKxh4BLMyq
+              system_secret_key: NTnkbmkMuzPjgwsBpJ6o
+              ceph_conf_overrides:
+                global:
+                  osd_pool_default_pg_num: 64
+                  osd_default_pool_size: 2
+                  osd_pool_default_pgp_num: 64
+                  mon_max_pg_per_osd: 1024
+        ceph-rgw2:
+          config:
+            ansi_config:
+              ceph_test: True
+              ceph_origin: distro
+              ceph_repository: rhcs
+              osd_scenario: lvm
+              osd_auto_discovery: False
+              journal_size: 1024
+              ceph_stable: True
+              ceph_stable_rh_storage: True
+              fetch_directory: ~/fetch
+              copy_admin_key: true
+              dashboard_enabled: true
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
+              rgw_multisite: true
+              rgw_zone: r1zone2
+              rgw_zonegroup: r1zonegroup
+              rgw_realm: realm1
+              rgw_zonemaster: false
+              rgw_zonesecondary: true
+              rgw_zonegroupmaster: false
+              rgw_zone_user: r1zoneuser2
+              rgw_zone_user_display_name: "r1zoneuser2"
+              system_access_key: 86nBoQOGpQgKxh4BLMyq
+              system_secret_key: NTnkbmkMuzPjgwsBpJ6o
+              rgw_multisite_proto: "http"
+              rgw_pull_proto: http
+              rgw_pull_port: 8080
+              ceph_conf_overrides:
+                global:
+                  osd_pool_default_pg_num: 64
+                  osd_default_pool_size: 2
+                  osd_pool_default_pgp_num: 64
+                  mon_max_pg_per_osd: 1024
+      desc: setup multisite cluster using ceph-ansible
+      polarion-id: CEPH-83575224
+      abort-on-fail: true
+  - test:
+      clusters:
+        ceph-rgw1:
+          config:
+            commands:
+              - "ceph -s"
+              - "ceph osd dump"
+            sudo: true
+        ceph-rgw2:
+          config:
+            commands:
+              - "ceph -s"
+              - "ceph osd dump"
+            sudo: true
+      desc: Check the cluster health
+      polarion-id: CEPH-83575200
+      module: exec.py
+      name: check-ceph-health
