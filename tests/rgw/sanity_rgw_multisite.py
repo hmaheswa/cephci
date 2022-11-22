@@ -188,15 +188,17 @@ def run(**kw):
                         io_info, exec_from, verify_io_on_site_node, io_info
                     )
 
-                verify_out, err = verify_io_on_site_node.exec_command(
+                verify_status = verify_io_on_site_node.exec_command(
                     cmd="sudo python3 "
                     + test_folder_path
                     + lib_dir
                     + f"read_io_info.py -c {config_file_name}",
                     timeout=timeout,
+                    long_running=True,
                 )
-                log.info(verify_out)
-                log.error(err)
+                log.info(f"verify io status code is : {verify_status}")
+                if verify_status != 0:
+                    return verify_status
 
     return test_status
 
