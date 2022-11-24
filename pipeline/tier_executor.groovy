@@ -161,7 +161,7 @@ node(nodeName) {
         testStages = fetchStages["testStages"]
         final_stage = fetchStages["final_stage"]
         println("final_stage : ${final_stage}")
-        currentBuild.description = "${params.rhcephVersion} - ${tierLevel} - ${currentStageLevel}"
+        currentBuild.description = "${params.rhcephVersion} - ${tierLevel} - ${currentStageLevel} \n ceph-version : ${buildArtifacts['ceph-version']}"
     }
 
     parallel testStages
@@ -174,13 +174,15 @@ node(nodeName) {
             if ("openstack-only" in tags_list){
                 run_type = "PSI Only Run"
             }
-            sharedLib.sendEmail(
-                run_type,
-                testResults,
-                sharedLib.buildArtifactsDetails(releaseContent, rhcephVersion, overrides.get("build")),
-                tierLevel.capitalize(),
-                currentStageLevel.capitalize()
-            )
+            if (testResults) {
+                sharedLib.sendEmail(
+                    run_type,
+                    testResults,
+                    sharedLib.buildArtifactsDetails(releaseContent, rhcephVersion, overrides.get("build")),
+                    tierLevel.capitalize(),
+                    currentStageLevel.capitalize()
+                )
+            }
         }
 
         stage('postBuildAction') {
@@ -278,6 +280,13 @@ node(nodeName) {
             writeYaml file: "${env.WORKSPACE}/${dirName}/metadata.yaml", data: content
             sharedLib.uploadResults(dirName, "${env.WORKSPACE}/${dirName}")
 
+            testStatus = "SUCCESS"
+            if ("FAIL" in sharedLib.fetchStageStatus(testResults)) {
+                currentBuild.result = "FAILED"
+                buildStatus = "fail"
+                testStatus = "FAILURE"
+            }
+
             def msgMap = [
                 "artifact": [
                     "type": "product-build",
@@ -316,7 +325,7 @@ node(nodeName) {
                 "test": [
                     "type": buildType,
                     "category": "functional",
-                    "result": currentBuild.currentResult,
+                    "result": testStatus,
                     "object-prefix": dirName,
                 ],
                 "recipe": buildArtifacts,
@@ -361,10 +370,6 @@ node(nodeName) {
             }
             overrides = writeJSON returnText: true, json: overrides
 
-            if ("FAIL" in sharedLib.fetchStageStatus(testResults)) {
-                currentBuild.result = "FAILED"
-                buildStatus = "fail"
-            }
             // Do not trigger next stage of execution
             // 1) if the current tier executed is tier-0 and it failed
             // 2) if the current stage was final_stage of a particular tier and tier is greater than 2
