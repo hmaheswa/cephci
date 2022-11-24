@@ -74,8 +74,9 @@ def run(**kw):
     test_site_node = test_site.get_ceph_object("rgw").node
     test_client_node = test_site.get_ceph_object("client").node
     config["git-url"] = config.get(
-        "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
+        "git-url", "https://github.com/hmaheswa/ceph-qe-scripts.git"
     )
+    config["branch"] = "revert_fileops_changes"
 
     set_env = config.get("set-env", False)
     primary_cluster = clusters.get("ceph-rgw1", clusters[list(clusters.keys())[0]])
