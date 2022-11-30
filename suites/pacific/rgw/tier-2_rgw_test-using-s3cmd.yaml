@@ -130,6 +130,17 @@ tests:
                   placement:
                     host_pattern: "*"
 
+  - test:
+      abort-on-fail: true
+      config:
+        cephadm: true
+        commands:
+          - "ceph version"
+          - "ceph versions"
+      desc: displaying ceph version
+      module: exec.py
+      name: displaying ceph version
+
 #   S3CMD tests
   - test:
       name: S3CMD basic  operations
