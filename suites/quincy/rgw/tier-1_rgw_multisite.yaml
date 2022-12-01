@@ -119,6 +119,27 @@ tests:
       clusters:
         ceph-pri:
           config:
+            cephadm: true
+            commands:
+              - "ceph config set mgr mgr/cephadm/container_image_grafana registry-proxy.engineering.redhat.com/rh-osbs/grafana:ceph-6.0-rhel-9-containers-candidate-99494-20221026123006"
+              - "ceph orch restart mgr"
+              - "ceph orch restart mon"
+        ceph-sec:
+          config:
+            cephadm: true
+            commands:
+              - "ceph config set mgr mgr/cephadm/container_image_grafana registry-proxy.engineering.redhat.com/rh-osbs/grafana:ceph-6.0-rhel-9-containers-candidate-99494-20221026123006"
+              - "ceph orch restart mgr"
+              - "ceph orch restart mon"
+      desc: setting custom grafana image
+      module: exec.py
+      name: setting custom grafana image
+
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
             verify_cluster_health: true
             steps:
               - config:
