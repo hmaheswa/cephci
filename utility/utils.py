@@ -149,10 +149,11 @@ def verify_sync_status(verify_io_on_site_node, retry=10, delay=60):
     """
     verify multisite sync status on primary
     """
+    time.sleep(20)
     check_sync_status, err = verify_io_on_site_node.exec_command(
         cmd="sudo radosgw-admin sync status"
     )
-
+    log.info(check_sync_status)
     # check for 'failed' or 'ERROR' in sync status.
     if "failed|ERROR" in check_sync_status:
         log.info("checking for any sync error")
