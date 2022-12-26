@@ -313,7 +313,7 @@ def enable_rhel_rpms(ceph, distro_ver):
     }
 
     time.sleep(20)
-    ceph.exec_command(sudo=True, cmd=f"subscription-manager release --set {distro_ver}")
+    # ceph.exec_command(sudo=True, cmd=f"subscription-manager release --set {distro_ver}")
 
     for repo in repos.get(distro_ver[0]):
         ceph.exec_command(
