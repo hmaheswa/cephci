@@ -42,14 +42,13 @@ from utility.polarion import post_to_polarion
 from utility.retry import retry
 from utility.utils import (
     ReportPortal,
-    close_and_remove_filehandlers,
-    configure_logger,
     create_run_dir,
     create_unique_test_name,
     email_results,
     fetch_build_artifacts,
     generate_unique_id,
     magna_url,
+    validate_conf,
 )
 from utility.xunit import create_xunit_results
 
@@ -160,6 +159,7 @@ Options:
 """
 log = Log()
 test_names = []
+run_summary = {}
 
 
 @retry(LibcloudError, tries=5, delay=15)
@@ -181,15 +181,13 @@ def create_nodes(
         desc = "Ceph cluster preparation"
         rp_logger.start_test_item(name=name, description=desc, item_type="STEP")
 
-    log.info("Destroying existing osp instances..")
+    validate_conf(conf)
     if cloud_type == "openstack":
         cleanup_ceph_nodes(osp_cred, instances_name)
     elif cloud_type == "ibmc":
         cleanup_ibmc_ceph_nodes(osp_cred, instances_name)
 
     ceph_cluster_dict = {}
-
-    log.info("Creating osp instances")
     clients = []
     for cluster in conf.get("globals"):
         if cloud_type == "openstack":
@@ -250,6 +248,7 @@ def create_nodes(
                     private_ip=private_ip,
                     hostname=node.hostname,
                     ceph_vmnode=node,
+                    id=node.id,
                 )
                 ceph_nodes.append(ceph)
 
@@ -451,10 +450,11 @@ def run(args):
 
     platform = args["--platform"]
     build = args.get("--build")
+    upstream_build = args.get("--upstream-build", None)
 
     if build and build not in ["released"] and not ignore_latest_nightly_container:
         base_url, docker_registry, docker_image, docker_tag = fetch_build_artifacts(
-            build, rhbuild, platform, args.get("--upstream-build", None)
+            build, rhbuild, platform, upstream_build
         )
 
     store = args.get("--store") or False
@@ -558,7 +558,7 @@ def run(args):
 
     distro = ", ".join(list(set(distro)))
     if not ceph_version and build == "upstream":
-        ceph_version.append(args.get("--upstream-build", None))
+        ceph_version.append(upstream_build)
     ceph_version = ", ".join(list(set(ceph_version)))
     ceph_ansible_version = ", ".join(list(set(ceph_ansible_version)))
 
@@ -577,7 +577,11 @@ def run(args):
         suite_file_name = " ".join(suite_file_name.split("_"))
         _log = run_dir.replace("/ceph/", "http://magna002.ceph.redhat.com/")
 
-        launch_name = f"RHCS {rhbuild} - {suite_file_name}"
+        launch_name = (
+            f"Upstream {upstream_build} - {suite_file_name}"
+            if build == "upstream"
+            else f"RHCS {rhbuild} - {suite_file_name}"
+        )
         launch_desc = textwrap.dedent(
             """
             "jenkin-url": {jenkin_job_url},
@@ -776,7 +780,7 @@ def run(args):
         unique_test_name = create_unique_test_name(tc["name"], test_names)
         test_names.append(unique_test_name)
 
-        tc["log-link"] = configure_logger(unique_test_name, run_dir)
+        tc["log-link"] = log.configure_logger(unique_test_name, run_dir)
 
         mod_file_name = os.path.splitext(test_file)[0]
         test_mod = importlib.import_module(mod_file_name)
@@ -948,7 +952,7 @@ def run(args):
     )
     log.info("\nAll test logs located here: {base}".format(base=url_base))
 
-    close_and_remove_filehandlers()
+    log.close_and_remove_filehandlers()
 
     test_run_metadata = {
         "jenkin-url": jenkin_job_url,
@@ -973,6 +977,7 @@ def run(args):
 
     if post_to_report_portal:
         rp_logger.finish_launch()
+        run_summary["rp_link"] = rp_logger.client.get_launch_ui_url()
 
     if xunit_results:
         create_xunit_results(suite_name, tcs, test_run_metadata)
@@ -988,6 +993,8 @@ def run(args):
         "total": f"{int(duration[0])} mins, {int(duration[1])} secs",
     }
     info = {"status": "Pass"}
+    with open(f"{run_dir}/run_summary.json", "w", encoding="utf-8") as f:
+        json.dump(run_summary, f, ensure_ascii=False, indent=4)
     test_res = {
         "result": tcs,
         "run_id": run_id,

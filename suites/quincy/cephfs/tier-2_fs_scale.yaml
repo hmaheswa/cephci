@@ -77,29 +77,21 @@ tests:
               pos_args:
                 - cephfs
               service: mds
+          - config:
+              args:
+                - ceph
+                - fs
+                - set
+                - cephfs
+                - max_mds
+                - "2"
+              command: shell
         verify_cluster_health: true
       desc: "Execute the cluster deployment workflow with label placement."
       destroy-cluster: false
       module: test_cephadm.py
       name: "cluster deployment"
       polarion-id: CEPH-83573777
-  -
-    test:
-      abort-on-fail: true
-      config:
-        args:
-          - ceph
-          - fs
-          - set
-          - cephfs
-          - max_mds
-          - "2"
-        command: shell
-      desc: "Add Active Active configuration of MDS for cephfs"
-      destroy-cluster: false
-      module: test_bootstrap.py
-      name: "Add Active Active configuration of MDS"
-      polarion-id: CEPH-11344
   -
     test:
       abort-on-fail: true
@@ -120,3 +112,15 @@ tests:
       module: cephfs_scale.max_snapshots.py
       name: cephfs Scale test for max Snapshots
       polarion-id: "CEPH-83573520"
+  - test:
+      abort-on-fail: false
+      desc: "Max subvolumess"
+      module: cephfs_scale.max_subvolumes.py
+      name: cephfs Scale test for max subvolumes
+      polarion-id: ~
+  - test:
+      abort-on-fail: false
+      desc: "Max snaps per volume"
+      module: cephfs_scale.max_smallfile_snap.py
+      name: cephfs Scale test for max Snapshots
+      polarion-id: ~

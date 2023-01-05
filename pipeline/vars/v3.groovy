@@ -99,6 +99,9 @@ def sendEmail(
     if (artifactDetails.repository) {
         body += "<tr><td>Container Image</td><td>${artifactDetails.repository}</td></tr>"
     }
+    if (artifactDetails.rp_link) {
+        body += "<tr><td>Report Portal</td><td>${artifactDetails.rp_link}</td></tr>"
+    }
     if (artifactDetails.log) {
         body += "<tr><td>Log</td><td>${artifactDetails.log}</td></tr>"
     } else {
@@ -225,6 +228,9 @@ def sendConsolidatedEmail(
     }
     if (artifactDetails.repository) {
         body += "<tr><td>Container Image</td><td>${artifactDetails.repository}</td></tr>"
+    }
+    if (artifactDetails.rp_link) {
+        body += "<tr><td>Report Portal</td><td>${artifactDetails.rp_link}</td></tr>"
     }
     if (artifactDetails.log) {
         body += "<tr><td>Log</td><td>${artifactDetails.log}</td></tr>"
@@ -472,14 +478,13 @@ def uploadTestResults(def sourceDir, def credPreproc, def runProperties, def sta
         ]
     ]
     if ( stageLevel ) {
-        launchConfig["name"] = runType.split(" ")[0] + " " + launchConfig["name"] + " " + stageLevel
+        launchConfig["name"] = runType + " " + launchConfig["name"] + " " + stageLevel
     }
     credPreproc["reportportal"]["launch"] = launchConfig
     writeJSON file: credFile, json: credPreproc
 
     // Upload xml file to report portal
-    sh(script: ".venv/bin/python utility/rp_client.py -c ${credFile} -d ${sourceDir}/payload")
-
+    rp_launch_id = sh(returnStdout: true, script: ".venv/bin/python utility/rp_client.py -c ${credFile} -d ${sourceDir}/payload")
     // Upload test result to polarion using xUnit Xml file
     withCredentials([
         usernamePassword(
@@ -500,6 +505,10 @@ def uploadTestResults(def sourceDir, def credPreproc, def runProperties, def sta
             sh script: "${localCmd}"
         }
     }
+    def launch_rgex = (rp_launch_id =~ /launch id: (\d+)/)
+	if(launch_rgex){
+	return launch_rgex[0][1]
+	}
 }
 
 def fetchStageStatus(def testResults) {
@@ -1125,6 +1134,39 @@ def getBuildUser() {
         "buildUserEmail": "${buildUserEmail}",
         "buildUserName": "${buildUserName}"
     ]
+}
+
+def getNodeList(def clusterConf){
+    def conf = yamlToMap(clusterConf, env.WORKSPACE)
+    def nodesMap = conf.globals[0]["ceph-cluster"].nodes
+    def nodeList = []
+
+    nodesMap.eachWithIndex { item, index ->
+        nodeList.add(item.hostname)
+    }
+
+    return nodeList
+}
+
+def reimageNodes(def platform, def nodelist) {
+    // Reimage nodes in Octo lab
+    sh (
+        script: "bash ${env.WORKSPACE}/pipeline/scripts/ci/reimage-octo-node.sh --platform ${platform} --nodes ${nodelist}"
+    )
+}
+
+def get_ceph_version(rhcephVersion){
+    def cephVersion = 'quincy'
+    if(rhcephVersion.contains("5.")){
+        cephVersion = 'pacific'
+    }
+    else if(rhcephVersion.contains("3.")){
+        cephVersion = 'luminous'
+    }
+    else if(rhcephVersion.contains("4.")){
+        cephVersion = 'nautilus'
+    }
+    return cephVersion
 }
 
 return this;

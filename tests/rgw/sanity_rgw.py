@@ -86,7 +86,11 @@ def run(ceph_cluster, **kw):
     test_config = {"config": config.get("test-config", {})}
     rgw_node = rgw_ceph_object.node
     client_node = client_ceph_object.node
-    run_on_rgw = config.get("run-on-rgw", False)
+    run_on_rgw = (
+        True
+        if ceph_cluster.rhcs_version.version[0] == 4
+        else config.get("run-on-rgw", False)
+    )
     distro_version_id = rgw_node.distro_info["VERSION_ID"]
 
     if run_on_rgw:
@@ -162,7 +166,7 @@ def run(ceph_cluster, **kw):
     script_dir = DIR[test_version]["script"]
     config_dir = DIR[test_version]["config"]
     lib_dir = DIR[test_version]["lib"]
-    timeout = config.get("timeout", 300)
+    # timeout = config.get("timeout", 300)
 
     if test_config["config"]:
         log.info("creating custom config")
@@ -187,14 +191,16 @@ def run(ceph_cluster, **kw):
 
     if run_io_verify:
         log.info("running io verify script")
-        verify_out, err = exec_from.exec_command(
+        verify_status = exec_from.exec_command(
             cmd=f"sudo {python_cmd} "
             + test_folder_path
             + lib_dir
             + f"read_io_info.py -c {config_file_name}",
-            timeout=timeout,
+            long_running=True,
         )
-        log.info(verify_out)
-        log.error(err)
+        log.info(f"verify io status code is : {verify_status}")
+        if verify_status != 0:
+            log.error(verify_status)
+            return verify_status
 
     return test_status
