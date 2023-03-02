@@ -23,7 +23,7 @@ tests:
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
-                skip-dashboard: true
+                skip-monitoring-stack: true
           - config:
               command: add_hosts
               service: host
@@ -48,22 +48,18 @@ tests:
               args:
                 all-available-devices: true
           - config:
-              command: apply_spec
-              service: orch
-              specs:
-                - service_type: rgw
-                  service_id: rgw.ssl
-                  placement:
-                    nodes:
-                      - node5
-                  spec:
-                    ssl: true
-                    rgw_frontend_ssl_certificate: create-cert
+              command: apply
+              service: rgw
+              pos_args:
+                - rgw.all
+              args:
+                placement:
+                  label: rgw
       desc: RHCS cluster deployment using cephadm.
+      polarion-id: CEPH-83573713
       destroy-cluster: false
       module: test_cephadm.py
       name: deploy cluster
-      polarion-id: CEPH-83573777
 
   # Tests for SASL_PLAINTEXT security type and PLAIN mechanism
   - test:
