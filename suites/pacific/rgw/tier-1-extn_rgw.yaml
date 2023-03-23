@@ -264,3 +264,24 @@ tests:
         script-name: test_LargeObjGet_GC.py
         config-file-name: test_bucket_remove_with_multipart_abort.yaml
         timeout: 500
+
+  - test:
+      name: Test functionality of bucket check fix
+      desc: Test functionality of bucket check fix
+      polarion-id: CEPH-83574832
+      module: sanity_rgw.py
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_bucket_check_fix.yaml
+        timeout: 500
+
+  - test:
+      name: Test functionality of user stat reset
+      desc: Test functionality of user stat reset
+      comments: Known issue BZ-2167475
+      polarion-id: CEPH-83575439
+      module: sanity_rgw.py
+      config:
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_user_stats_reset.yaml
+        timeout: 500

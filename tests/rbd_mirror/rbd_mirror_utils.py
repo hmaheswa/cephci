@@ -4,6 +4,7 @@ import json
 import random
 import string
 import time
+from typing import List
 
 from ceph.ceph import CommandFailed
 from ceph.parallel import parallel
@@ -296,6 +297,10 @@ class RbdMirror:
         log.debug(
             f"Config Recieved for initial mirror config: poolname:{poolname}, imagename:{imagename}\nkw:{kw}"
         )
+        if kw.get("mirrormode") == "snapshot" and kw.get("mode") == "pool":
+            log.error("Invalid scenario for configuring mirror")
+            return 1
+
         imagespec = poolname + "/" + imagename
         imagesize = kw.get("imagesize")
         io = kw.get("io_total")
@@ -304,11 +309,14 @@ class RbdMirror:
             p.spawn(mirror2.create_pool, poolname=poolname)
 
         self.create_image(imagespec=imagespec, size=imagesize)
-        if kw.get("mirrormode") != "snapshot":
+        if kw.get("mirrormode") != "snapshot" and "journaling" not in kw.get(
+            "image_feature", ""
+        ):
             self.image_feature_enable(imagespec=imagespec, image_feature="journaling")
         if kw.get("image_feature"):
-            image_feature = kw.get("image_feature")
-            self.image_feature_enable(imagespec=imagespec, image_feature=image_feature)
+            self.image_feature_enable(
+                imagespec=imagespec, image_feature=kw["image_feature"]
+            )
 
         if kw.get("mode"):
             kw["peer_mode"] = kw.get("peer_mode", "bootstrap")
@@ -342,15 +350,24 @@ class RbdMirror:
                 state_pattern="up+replaying",
             )
 
-    # Wait for required status
     def wait_for_status(self, **kw):
-        # Waiting for cluster to be aware of new event
+        """Wait for required mirror status of pool or image.
+
+        Args:
+            kw:
+            poolname: Name of the pool
+            imagespec: Image specification of the image of which status needs to be checked
+            state_pattern: Required mirror image state
+            description_pattern: Required mirror image description
+            retry_interval: sleep duration in between retries.
+            ignore_command_failure: true if command failure is to be ignored.
+        """
         starttime = datetime.datetime.now()
         if kw.get("tout"):
             tout = kw.get("tout")
         else:
             tout = datetime.timedelta(seconds=1200)
-        time.sleep(20)
+        time.sleep(kw.get("retry_interval", 20))
         while True:
             if kw.get("poolname", False):
                 if kw.get("health_pattern"):
@@ -384,33 +401,54 @@ class RbdMirror:
                     if kw.get("images_pattern") == num_image:
                         return 0
             else:
-                if kw.get("state_pattern"):
-                    out = self.mirror_status("image", kw.get("imagespec"), "state")
-                    log.info(
-                        "State of {} image in {} cluster: {}".format(
-                            kw.get("imagespec"), self.cluster_name, out
+                try:
+                    if kw.get("state_pattern"):
+                        out = self.mirror_status("image", kw.get("imagespec"), "state")
+                        log.info(
+                            f"State of image {kw['imagespec']} : {out}, \
+                            waiting for {kw['state_pattern']}"
                         )
-                    )
-                    if kw.get("state_pattern") in out:
-                        return 0
-                if kw.get("description_pattern"):
-                    out = self.get_position(
-                        imagespec=kw.get("imagespec"),
-                        pattern=kw.get("description_pattern"),
-                    )
-                    log.info(
-                        "Description of {} image in {} cluster: {}".format(
-                            kw.get("imagespec"), self.cluster_name, out
+                        if kw["state_pattern"] in out:
+                            return 0
+                    if kw.get("description_pattern"):
+                        out = self.get_position(
+                            imagespec=kw.get("imagespec"),
+                            pattern=kw.get("description_pattern"),
                         )
-                    )
-                    return out
+                        log.info(
+                            "Description of {} image in {} cluster: {}".format(
+                                kw.get("imagespec"), self.cluster_name, out
+                            )
+                        )
+                        return out
+                    if kw.get("description"):
+                        image_description = self.mirror_status(
+                            "image", kw.get("imagespec"), "description"
+                        )
+                        log.debug(
+                            f"Image description: {image_description}, expected {kw['description']}"
+                        )
+                        if kw["description"] == image_description:
+                            return 0
+                except CommandFailed:
+                    if kw.get("state_pattern") == "down+unknown" or kw.get(
+                        "ignore_command_failure"
+                    ):
+                        continue
+                    else:
+                        raise
             if datetime.datetime.now() - starttime <= tout:
-                time.sleep(20)
+                time.sleep(kw.get("retry_interval", 20))
             else:
                 raise Exception("Required status can not be attained")
 
-    # Wait for replay to complete, check every 30 seconds
     def wait_for_replay_complete(self, imagespec):
+        """Waits till image replay to complete in journal based mirroring.
+
+        Args:
+            imagespec: image specification.
+        """
+        log.info(f"Waiting for {imagespec} to complete replay")
         while True:
             time.sleep(30)
             out = self.wait_for_status(
@@ -419,7 +457,7 @@ class RbdMirror:
             if self.ceph_version >= 4:
                 out1 = out.split('entries_behind_primary":')
                 out2 = out1[1].split(",")
-                log.info(f"entries_behind_primary : {out2[0]}")
+                log.debug(f"entries_behind_primary : {out2[0]}")
                 if int(out2[0]) == 0:
                     time.sleep(30)
                     return out2[0]
@@ -430,6 +468,8 @@ class RbdMirror:
     # Get Position
     def get_position(self, imagespec, pattern=None):
         out = self.mirror_status("image", imagespec, "description")
+        if out == "local image is primary":
+            raise Exception("Position cannot be determined ")
         if pattern is not None:
             primary_pos = out.find("primary_position")
             mirror_pos = out.find("mirror_position")
@@ -605,6 +645,13 @@ class RbdMirror:
 
     # CLIs
     def benchwrite(self, **kw):
+        """Executes rbd bench write operation on provided image.
+
+        Args:
+          kw:
+            io: io size - Default 500M
+            imagespec: image specification
+        """
         if self.ceph_version < 3:
             self.exec_cmd(
                 cmd="rbd bench-write --io-total {} {}".format(
@@ -614,8 +661,9 @@ class RbdMirror:
             )
         else:
             self.exec_cmd(
-                cmd="rbd bench --io-type write --io-threads 16 --io-total {} {}".format(
-                    kw.get("io", "500M"), kw.get("imagespec")
+                cmd=(
+                    "rbd bench --io-type write --io-threads 16 "
+                    f"--io-total {kw.get('io', '500M')} {kw.get('imagespec')}"
                 ),
                 long_running=True,
             )
@@ -649,11 +697,9 @@ class RbdMirror:
         Args:
             **kw:
                 imagespec: pool/image_name on which image features will enable
-                image_features: comma seperated value for image features
+                image_feature: comma seperated value for image features, default: journaling
         """
-        cmd = "rbd feature enable {} {}".format(
-            kw.get("imagespec"), kw.get("image_feature")
-        )
+        cmd = f"rbd feature enable {kw.get('imagespec')} {kw.get('image_feature')}"
         self.exec_cmd(cmd=cmd)
 
     def image_feature_disable(self, **kw):
@@ -670,6 +716,13 @@ class RbdMirror:
         self.exec_cmd(cmd=cmd)
 
     def export_image(self, **kw):
+        """Exports provided image as provided path.
+
+        Args:
+          kw:
+            imagespec: image specification
+            path: path where image needs to be exported
+        """
         self.exec_cmd(
             cmd="rbd export {} {}".format(kw.get("imagespec"), kw.get("path")),
             long_running=True,
@@ -710,11 +763,20 @@ class RbdMirror:
         json_dict = json.loads(output)
         return self.value(args[1], json_dict)
 
-    # Mirroring Status
     def mirror_status(self, *args):
+        """Returns pool or image mirror status based on the input.
+
+        Args:
+            "pool" or "image" of which status needs to be checked.
+            <pool-name> or <image-specification> as per the need.
+            <key> field of status that is required to be returned.
+
+        Returns:
+            <value> of provided key present in status.
+        """
         output = self.exec_cmd(
             output=True,
-            cmd="rbd mirror {} status {} --format=json".format(args[0], args[1]),
+            cmd=f"rbd mirror {args[0]} status {args[1]} --format=json",
         )
         json_dict = json.loads(output)
         return self.value(args[2], json_dict)
@@ -754,12 +816,17 @@ class RbdMirror:
             )
         )
 
-    # Promote Image
     def promote(self, **kw):
+        """Promote an image based on the given inputs.
+        Args:
+          kw:
+            force: True if image needs to be promoted forcefully.
+            imagespec: image specification.
+        """
         if kw.get("force"):
             return self.exec_cmd(
                 output=True,
-                cmd="rbd mirror image promote --force {}".format(kw.get("imagespec")),
+                cmd=f"rbd mirror image promote --force {kw.get('imagespec')}",
             )
         else:
             return self.exec_cmd(
@@ -767,13 +834,21 @@ class RbdMirror:
                 cmd="rbd mirror image promote {}".format(kw.get("imagespec")),
             )
 
-    # Demote Image
     def demote(self, imagespec):
-        return self.exec_cmd(cmd="rbd mirror image demote {}".format(imagespec))
+        """Demote an image.
 
-    # Resync Image
+        Args:
+            imagespec: image specifications of image to be resynced.
+        """
+        return self.exec_cmd(cmd=f"rbd mirror image demote {imagespec}")
+
     def resync(self, imagespec):
-        self.exec_cmd(cmd="rbd mirror image resync {}".format(imagespec))
+        """Initiate image resync.
+
+        Args:
+            imagespec: image specifications of image to be resynced.
+        """
+        self.exec_cmd(cmd=f"rbd mirror image resync {imagespec}")
 
     def random_string(self):
         temp_str = "".join([random.choice(string.ascii_letters) for _ in range(10)])
@@ -833,11 +908,11 @@ class RbdMirror:
                 self.delete_pool(poolname=pool)
                 peercluster.delete_pool(poolname=pool)
 
-    def get_rbd_service_name(self, service_name):
+    def get_rbd_service_name(self, service_name="rbd-mirror"):
         """
         Gets the rbd mirror service name where the rbd mirror daemon running
         Args:
-            service_name:
+            service_name: By default it would be "rbd-mirror"
 
         Returns:
             service_name --> str
@@ -859,6 +934,9 @@ class RbdMirror:
         Returns:
             None
         """
+        if not service_name:
+            service_name = self.get_rbd_service_name()
+
         log.info(f"{operation}ing the service : {service_name} ")
         self.ceph_rbdmirror.exec_command(
             sudo=True, cmd=f"systemctl {operation} {service_name}"
@@ -1069,7 +1147,7 @@ def rbd_mirror_config(**kw):
             kw["config"]["rep_pool_config"]["io_total"] = kw["config"][
                 "rep_pool_config"
             ].get("io_total", "1G")
-            kw["config"]["ec_pool_config"]["mode"] = kw["config"][
+            kw["config"]["rep_pool_config"]["mode"] = kw["config"][
                 "rep_pool_config"
             ].get("mode", "pool")
 
@@ -1091,7 +1169,7 @@ def rbd_mirror_config(**kw):
             io_total=kw["config"]["rep_pool_config"]["io_total"],
             mode=kw["config"]["rep_pool_config"]["mode"],
             mirrormode=kw["config"]["rep_pool_config"].get("mirrormode", ""),
-            image_feature=kw["config"]["ec_pool_config"].get("image_feature"),
+            image_feature=kw["config"]["rep_pool_config"].get("image_feature", ""),
             **kw,
         )
 
@@ -1146,10 +1224,87 @@ def rbd_mirror_config(**kw):
             io_total=kw["config"]["ec_pool_config"]["io_total"],
             mode=kw["config"]["ec_pool_config"]["mode"],
             mirrormode=kw["config"]["ec_pool_config"].get("mirrormode", ""),
-            image_feature=kw["config"]["ec_pool_config"].get("image_feature"),
+            image_feature=kw["config"]["ec_pool_config"].get("image_feature", ""),
             **kw,
         )
 
         rbd_obj.update({"ec_rbdmirror": {"mirror1": ec_mirror1, "mirror2": ec_mirror2}})
 
     return rbd_obj
+
+
+def parallel_bench_on_n_images(
+    cluster: RbdMirror, imagespecs: List[str], io: str
+) -> None:
+    """Run benchwrite on list of provided images parallelly.
+
+    Args:
+        imagespec(List(str)): list of image specifications.
+        io(string): ios on each image.
+    """
+    with parallel() as p:
+        for imagespec in imagespecs:
+            p.spawn(cluster.benchwrite, imagespec=imagespec, io=io)
+
+
+def prepare_for_failback(demoted: RbdMirror, imagespec: str):
+    """Prepare image for failback after non-orderly failover.
+
+    Args:
+        promoted: RbdMirror object of cluster with promoted image.
+        demoted: RbdMirror object of cluster with previou primary.
+        imagespec: Image specification of image to be failed back.
+    """
+    log.info(f"Preparing image {imagespec} for failback")
+    demoted.demote(imagespec)
+    demoted.wait_for_status(imagespec=imagespec, state_pattern="up+error")
+    demoted.resync(imagespec)
+    demoted.wait_for_status(
+        imagespec=imagespec, state_pattern="up+replaying", ignore_command_failure=True
+    )
+    demoted.wait_for_replay_complete(imagespec)
+    # TBD: Implement above for snapshot-based mirroring.
+
+
+def fail_back(
+    promoted: RbdMirror,
+    demoted: RbdMirror,
+    imagespec: str,
+    orderly: bool,
+    wait_for_completion=True,
+):
+    """Perform failback.
+
+    Args:
+        promoted: RbdMirror object of cluster with promoted image.
+        demoted: RbdMirror object of cluster with previou primary.
+        imagespec: Image specification of image to be failed back.
+        orderly: boolean value true demoting failover mode.
+                 True - if orderly(relocated)
+                 False- if non-orderly(force prmoted)
+    """
+    log.info(f"Performing failback of image {imagespec}")
+
+    if not orderly:
+        if demoted.mirror_status("image", imagespec, "state") != "up+stopped":
+            log.error(
+                "Aborting failback, seems like non-orderly failover was not performed"
+            )
+            return 1
+
+        prepare_for_failback(demoted, imagespec)
+
+    elif demoted.mirror_status("image", imagespec, "state") == "up+stopped":
+        log.error("Aborting failback, seems like orderly failover was not performed")
+        return 1
+
+    promoted.demote(imagespec)
+    demoted.wait_for_status(imagespec=imagespec, state_pattern="up+unknown")
+    demoted.promote(imagespec=imagespec)
+
+    if wait_for_completion:
+        demoted.wait_for_status(
+            imagespec=imagespec, description="local image is primary"
+        )
+
+    return 0

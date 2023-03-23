@@ -1,4 +1,5 @@
 from cli import Cli
+from cli.utilities.utils import verify_execution_status
 
 RPM_QUERY_ERROR_MSG = "package {} is not installed"
 
@@ -56,16 +57,30 @@ class Package(Cli):
             return out[0].strip()
         return out
 
-    def install(self, pkg, nogpgcheck=False):
+    def install(self, pkg, nogpgcheck=False, env_vars={}):
         """install a package or packages
 
         Args:
             pkg (str): package need to be installed
+            env_vars (dict): dictiory with environment variables
         """
-        cmd = f"{self.manager} install -y {pkg}"
+        cmd = ""
+        if env_vars:
+            for k, v in env_vars.items():
+                cmd += f"{k}={v} "
+
+        cmd += f"{self.manager} install -y {pkg}"
         if nogpgcheck:
             cmd += " --nogpgcheck"
-        if self.execute(sudo=True, long_running=True, cmd=cmd):
+
+        # When multiple nodes are passed, the execute returns a dict with return value
+        # for each node Each of these return values has to be checked to ensure that
+        # the package is installed in the specified nodes
+        out = self.execute(sudo=True, long_running=True, cmd=cmd)
+        if isinstance(out, dict):
+            if not verify_execution_status(out, pkg):
+                raise PackageError("Failed to install package '{pkg}'")
+        elif out:
             raise PackageError(f"Failed to install package '{pkg}'")
 
     def upgrade(self, pkg):
@@ -75,7 +90,15 @@ class Package(Cli):
             pkg (str): package need to be installed
         """
         cmd = f"{self.manager} upgrade -y {pkg}"
-        if self.execute(sudo=True, long_running=True, cmd=cmd):
+
+        # When multiple nodes are passed, the execute returns a dict with return value
+        # for each node Each of these return values has to be checked to ensure that
+        # the package is upgraded in the specified nodes
+        out = self.execute(sudo=True, long_running=True, cmd=cmd)
+        if isinstance(out, dict):
+            if not verify_execution_status(out, pkg):
+                raise PackageError("Failed to upgrade package '{pkg}'")
+        elif out:
             raise PackageError(f"Failed to upgrade package '{pkg}'")
 
     def add_repo(self, repo):

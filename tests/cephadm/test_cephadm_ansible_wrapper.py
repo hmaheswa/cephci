@@ -2,11 +2,12 @@ import os
 
 from cli.cephadm.ansible import Ansible
 from cli.cephadm.exceptions import ConfigNotFoundError
-from cli.utilities.packages import Rpm
+from cli.utilities.packages import Package, Rpm
 from cli.utilities.utils import (
     get_node_by_id,
     get_node_ip,
     put_cephadm_ansible_playbook,
+    set_selinux_mode,
 )
 from utility.install_prereq import (
     ConfigureCephadmAnsibleNode,
@@ -15,6 +16,10 @@ from utility.install_prereq import (
     SetUpSSHKeys,
 )
 from utility.utils import get_cephci_config
+
+
+class ClusterConfigurationFailure(Exception):
+    pass
 
 
 def validate_configs(config):
@@ -65,13 +70,16 @@ def setup_cluster(ceph_cluster, config):
     rhbuild = config.get("rhbuild")
     cloud_type = config.get("cloud-type")
     build_type = config.get("build_type")
+    ibm_build = config.get("ibm_build")
 
     if not Rpm(installer).query("cephadm-ansible"):
         SetUpSSHKeys.run(installer, nodes)
         ConfigureCephadmAnsibleNode.run(
-            installer, nodes, build_type, base_url, rhbuild, cloud_type
+            installer, nodes, build_type, base_url, rhbuild, cloud_type, ibm_build
         )
-        ExecutePreflightPlaybook.run(installer, base_url, cloud_type, build_type)
+        ExecutePreflightPlaybook.run(
+            installer, base_url, cloud_type, build_type, ibm_build
+        )
 
 
 def validate_cephadm_ansible_module(installer, playbook, extra_vars, extra_args):
@@ -108,6 +116,18 @@ def run(ceph_cluster, **kwargs):
     extra_vars, extra_args = aw.get("extra_vars", {}), aw.get("extra_args")
     module = aw.get("module")
     module_args = aw.get("module_args", {})
+
+    # Check if selinux mode has to be changed
+    selinux_mode = module_args.get("selinux")
+    if selinux_mode:
+        if not set_selinux_mode(nodes, selinux_mode):
+            raise ClusterConfigurationFailure("Failed to set Selinux to specified mode")
+
+    # Check if the scenario includes docker
+    if module_args.get("docker"):
+        extra_vars["docker"] = "true"
+        if not Rpm(installer).query("docker"):
+            Package(nodes).install("docker", nogpgcheck=True)
 
     if module == "cephadm_bootstrap":
         extra_vars["mon_ip"] = get_node_ip(nodes, module_args.get("mon_node"))

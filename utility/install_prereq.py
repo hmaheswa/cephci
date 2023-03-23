@@ -46,6 +46,18 @@ class ConfigureCephadmAnsibleNodeError(Exception):
     pass
 
 
+class SetupLicence:
+    """Setup Storage Licence"""
+
+    @staticmethod
+    def run(node, accept_eula={"ACCEPT_EULA": "Y"}):
+        cmd = "cat" if accept_eula else "touch"
+        cmd += " /usr/share/ibm-storage-ceph-license/accept"
+
+        Package(node).install("ibm-storage-ceph-license", env_vars=accept_eula)
+        return node.exec_command(sudo=True, cmd=cmd, check_ec=True)
+
+
 class SetUpSSHKeys:
     """Set up SSH keys"""
 
@@ -129,9 +141,9 @@ class ExecutePreflightPlaybook:
     """Execute cephadm-preflight.yaml playbook"""
 
     @staticmethod
-    def run(installer, base_url, cloud_type, build_type):
+    def run(installer, base_url, cloud_type, build_type, ibm_build=False):
         base_url = get_custom_repo_url(base_url, cloud_type)
-        extra_vars = {"ceph_origin": "rhcs"}
+        extra_vars = {"ceph_origin": "ibm" if ibm_build else "rhcs"}
         if build_type not in ["ga", "ga-async"]:
             extra_vars = {
                 "ceph_origin": "custom",
@@ -149,7 +161,7 @@ class ConfigureCephadmAnsibleNode:
     """Install cephadm-ansible and configure node"""
 
     @staticmethod
-    def run(installer, nodes, build_type, base_url, rhbuild, cloud_type):
+    def run(installer, nodes, build_type, base_url, rhbuild, cloud_type, ibm_build):
         base_url = get_custom_repo_url(base_url, cloud_type)
 
         ConfigureCephToolsRepositories().run(installer, build_type, base_url, rhbuild)
@@ -162,6 +174,8 @@ class ConfigureCephadmAnsibleNode:
                 f"Failed to enable ansible repo '{RHEL8_ANSIBLE_REPO}' on node '{installer}'"
             )
 
+        if ibm_build:
+            SetupLicence.run(installer)
         Package(installer).install("cephadm-ansible", nogpgcheck=True)
         ConfigureCephadmAnsibleInventory().run(nodes)
 

@@ -84,6 +84,22 @@ tests:
       polarion-id: CEPH-9230
 
   - test:
+      desc: Verify Delayed deletion with exclusive feature on RBD image
+      module: rbd_exclusive_lock_rm_image.py
+      config:
+        io-total: 5G
+      name: Verify exclusive lock feature
+      polarion-id: CEPH-11408
+
+  - test:
+      desc: verify for parent image deletion after flattening the clone and removing snap
+      config:
+        io-total: 5G
+      module: rbd_clone_delete_parent_image.py
+      name: Test for parent image deletion after flattening the clone and removing snap
+      polarion-id: CEPH-11409
+
+  - test:
       desc: Verify that clones creation and deletion of parent image with V2 enabled
       destroy-cluster: false
       module: rbd_clonev2.py
@@ -145,3 +161,15 @@ tests:
       module: rbd_snapshot_rename_advanced.py
       name: Test Snapshot Rename with clone operations in progress
       polarion-id: CEPH-9836
+
+  - test:
+      desc: Image migration from two different EC pools to EC pool
+      module: rbd_migration_2diff_ec_pool_ec.py
+      name: Test image migration on ecpool with different K_m values
+      polarion-id: CEPH-83573322
+
+  - test:
+      desc: Image migration from replication pools to replication pool
+      module: rbd_image_Live_migration_rep2Rep.py
+      name: Test image migration on replication pool
+      polarion-id: CEPH-83573293

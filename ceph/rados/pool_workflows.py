@@ -3,7 +3,9 @@ Module to change pool attributes
 1. Autoscaler tunables
 2. Snapshots
 """
+import datetime
 import time
+import traceback
 
 from ceph.ceph_admin import CephAdmin
 from ceph.rados.core_workflows import RadosOrchestrator
@@ -127,6 +129,97 @@ class PoolFunctions:
             f"Wrote {omap_data} bytes of omap data on the pool."
             f"Total stored omap data on pool : {total_omap_data}"
         )
+        return True
+
+    def prepare_static_data(self, node):
+        """
+        creates a 4MB obj, same obj will be put nobj times
+        because in do_rados_get we have to verify checksum
+        """
+        tmp_file = "/tmp/sdata.txt"
+        DSTR = "hello world"
+        sfd = None
+
+        try:
+            sfd = node.remote_file(file_name=tmp_file, file_mode="w+")
+            sfd.write(DSTR * 4)
+            sfd.flush()
+            cmd = f"truncate -s 4M {tmp_file}"
+            node.exec_command(cmd=cmd)
+        except Exception as e:
+            log.error(f"file creation failed with exception: {e}")
+            log.error(traceback.format_exc())
+
+        sfd.seek(0)
+        sfd.close()
+        return tmp_file
+
+    def do_rados_put(
+        self, client, pool: str, obj_name: str = None, nobj: int = 1, offset: int = 0
+    ):
+        """
+        write static data to one object or nobjs in an app pool
+        Args:
+            client: client node
+            pool: pool name to which data needs to added
+            obj_name (optional): Name of the existing object or
+            new object to be created in the pool
+            nobj: Number of times data will be put to object 'obj_name'
+            with incremental offset if 'obj_name' is specified, else
+            data will be put once to nobj number of objects -
+            obj0, obj1, obj2 and so on...
+            offset: write object with start offset, default - 0
+        Returns: 0 -> pass, 1 -> fail
+        """
+        infile = self.prepare_static_data(client)
+        log.debug(f"Input file is {infile}")
+
+        for i in range(nobj):
+            log.info(f"running command on {client.hostname}")
+            put_cmd = (
+                f"rados put -p {pool} obj{i} {infile}"
+                if obj_name is None
+                else f"rados put -p {pool} {obj_name} {infile}"
+            )
+            if offset:
+                put_cmd = f"{put_cmd} --offset {offset}"
+            try:
+                out, _ = client.exec_command(sudo=True, cmd=put_cmd)
+                if obj_name is not None and offset:
+                    offset += offset
+            except Exception:
+                log.error(traceback.format_exc)
+                return 1
+        return 0
+
+    def do_rados_append(self, client, pool: str, obj_name: str = None, nobj: int = 1):
+        """
+        Append static data to nobjs already present in a pool
+        Args:
+            client: client node
+            pool: pool name to which the object belongs
+            obj_name (optional): Name of the existing object in the pool
+            nobj (optional): Number of times data will be appended
+            to object 'obj_name' if 'obj_name' is specified, else
+            data will be appended once to nobj number of objects -
+            obj0, obj1, obj2 and so on...
+        Returns: 0 -> pass, 1 -> fail
+        """
+        infile = self.prepare_static_data(client)
+        log.debug(f"Input file is {infile}")
+
+        for i in range(nobj):
+            log.info(f"running command on {client.hostname}")
+            append_cmd = (
+                f"rados append obj{i} {infile} -p {pool}"
+                if obj_name is None
+                else f"rados append {obj_name} {infile} -p {pool}"
+            )
+            try:
+                out, _ = client.exec_command(sudo=True, cmd=append_cmd)
+            except Exception:
+                log.error(traceback.format_exc)
+                return False
         return True
 
     def do_rados_delete(self, pool_name: str, pg_id: str = None):
@@ -354,3 +447,57 @@ class PoolFunctions:
             if entry["name"] == pool_name:
                 return entry["id"]
         log.error(f"Pool: {pool_name} not found")
+
+    def wait_for_clean_pool_pgs(self, pool_name: str, timeout: int = 9000) -> bool:
+        """
+        Waiting for up to 2.5 hours for the PG's to enter active + Clean state
+        Args:
+            pool_name: Name of the pool on which clean PGs should be checked
+            timeout: timeout in seconds or "unlimited"
+
+        Returns:  True -> pass, False -> fail
+        """
+        end_time = 0
+        if timeout == "unlimited":
+            condition = lambda x: "unlimited" == x
+        elif isinstance(timeout, int):
+            end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+            condition = lambda x: end_time > datetime.datetime.now()
+
+        pool_id = self.get_pool_id(pool_name=pool_name)
+        while condition(end_time if isinstance(timeout, int) else timeout):
+            flag = False
+            cmd = "ceph pg dump pgs"
+            pg_dump = self.rados_obj.run_ceph_command(cmd=cmd)
+            for entry in pg_dump["pg_stats"]:
+                if str(entry["pgid"]).startswith(str(pool_id)):
+                    # Proceeding to check if the PG is in active + clean on the pool
+                    rec = (
+                        "remapped",
+                        "backfilling",
+                        "degraded",
+                        "incomplete",
+                        "peering",
+                        "recovering",
+                        "recovery_wait",
+                        "undersized",
+                        "backfilling_wait",
+                    )
+                    flag = (
+                        False
+                        if any(key in rec for key in entry["state"].split("+"))
+                        else True
+                    )
+                    log.info(
+                        f"PG ID : {entry['pgid']}    ---------      PG State : {entry['state']}"
+                    )
+                    if not flag:
+                        break
+            if flag:
+                log.info("The recovery and back-filling of the OSD is completed")
+                return True
+            log.info("Waiting for active + clean. checking status again in a minute")
+            time.sleep(60)
+
+        log.error("The cluster did not reach active + Clean state")
+        return False

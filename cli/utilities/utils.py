@@ -1,6 +1,10 @@
 import os
 import re
+from subprocess import PIPE, Popen
+from threading import Thread
+from time import sleep
 
+from ceph.waiter import WaitUntil
 from utility.log import Log
 
 log = Log(__name__)
@@ -24,7 +28,34 @@ def get_disk_list(node, expr=None, **kw):
     return node.exec_command(cmd=cmd, **kw)
 
 
-def get_running_containers(node, expr=None, **kw):
+def get_container_images(node, name=None, tag=None, expr=None, format=None, **kw):
+    """Get container images on node
+
+    Args:
+        node (ceph): ceph node object
+        name (str): name of the image
+        tag (str): tag expression
+        expr (str): expression to filter containers
+        kw (dict): execute command parameters
+    """
+    cmd = "podman images --noheading"
+
+    if name:
+        cmd += f" {name}"
+
+    if name and tag:
+        cmd += f":{tag}"
+
+    if expr:
+        cmd += f" --filter {expr}"
+
+    if format:
+        cmd += f' --format "{format}"'
+
+    return node.exec_command(cmd=cmd, **kw)
+
+
+def get_running_containers(node, expr=None, format=None, **kw):
     """Get containers running on nodes
 
     Args:
@@ -36,6 +67,21 @@ def get_running_containers(node, expr=None, **kw):
     if expr:
         cmd += f" --filter {expr}"
 
+    if format:
+        cmd += f' --format "{format}"'
+
+    return node.exec_command(cmd=cmd, **kw)
+
+
+def exec_command_on_container(node, ctr, cmd, **kw):
+    """Execute command on container
+
+    Args:
+        node (ceph): ceph node object
+        ctr (str): container id
+        cmd (str): command to be expected
+    """
+    cmd = f'podman exec {ctr} /bin/sh -c "{cmd}"'
     return node.exec_command(cmd=cmd, **kw)
 
 
@@ -45,6 +91,28 @@ def os_major_version(node, **kw):
         node (ceph): Ceph node object
     """
     cmd = r"cat /etc/os-release | tr -dc '0-9.'| cut -d \. -f1"
+    return node.exec_command(cmd=cmd, **kw)
+
+
+def get_release_info(node, **kw):
+    """Get release info from node
+
+    Args:
+        node (ceph): ceph node object
+        kw (dict): execute command parameters
+    """
+    cmd = "cat /etc/redhat-release"
+    return node.exec_command(cmd=cmd, **kw)
+
+
+def get_kernel_version(node, **kw):
+    """Get kernel version from node
+
+    Args:
+        node (ceph): ceph node object
+        kw (dict): execute command parameters
+    """
+    cmd = "uname -a"
     return node.exec_command(cmd=cmd, **kw)
 
 
@@ -91,6 +159,9 @@ def get_custom_repo_url(base_url, cloud_type="openstack"):
         cloud_type (str): cloudtype (openstack|ibmc)
         base_url (str): base URL of repository
     """
+    if base_url.endswith(".repo"):
+        return base_url
+
     if not base_url.endswith("/"):
         base_url += "/"
 
@@ -214,3 +285,155 @@ def get_builds_by_rhbuild(rhbuild):
         return match.group(1, 2)
 
     return
+
+
+def verify_execution_status(out, cmd):
+    """
+    Helper method to verify whether the installation or upgrade happened
+    on all the nodes specified
+    """
+    for node, result in out.items():
+        if result != 0:
+            log.error(f"Execution failed for '{cmd}' on '{node}'")
+            return False
+    return True
+
+
+def set_selinux_mode(nodes, enforcing_mode):
+    """
+    Sets the selinux mode to the specified value and validate whether the selinux mode is set
+    Args:
+        nodes (ceph): ceph node objects
+        enforcing_mode (str): enforcing/permissive
+    """
+    if enforcing_mode == "permissive":
+        mode = "0"
+    elif enforcing_mode == "enforcing":
+        mode = "1"
+    else:
+        log.error(
+            f"Only permissive and enforcing modes accepted, given {enforcing_mode}"
+        )
+        return False
+
+    # Set selinux to the given mode
+    for node in nodes:
+        _, err = node.exec_command(cmd=f"setenforce {mode}", sudo=True)
+        if err:
+            log.error(
+                f"Failed to set selinux mode to {enforcing_mode} on {node.hostname}"
+            )
+            return False
+
+    # Verify the selinux mode is as expected
+    for node in nodes:
+        out, _ = node.exec_command(cmd="getenforce")
+        if str(out.strip()).lower() != enforcing_mode:
+            log.error(f"Setenforce failed on {node.hostname}")
+            return False
+
+    return True
+
+
+def reboot_node(node):
+    """
+    Reboots a given node and waits till the reboot complete
+    Args:
+        node (ceph): Node to reboot
+
+    Returns (bool): Based on reboot status
+    """
+    reboot_cmd = "sleep 3; /sbin/shutdown -r now 'Reboot triggered by CephCI'"
+    node.exec_command(sudo=True, cmd=reboot_cmd, check_ec=False)
+    # If service was removed, wait for a timeout to check whether its removed
+    timeout, interval = 300, 10
+    for w in WaitUntil(timeout=timeout, interval=interval):
+        try:
+            node.reconnect()
+            log.info(f"Node {node.hostname} reconnected after reboot")
+            return True
+        except Exception:
+            log.warning(f"Node {node.hostname} is not back after reboot")
+    if w.expired:
+        return False
+
+
+def get_service_id(node, service_name):
+    """
+    Returns the service id of a given service
+    Args:
+        node (ceph): Node to execute the cmd
+        service_name: Service name
+
+    Returns (str): Service ID
+    """
+    out, err = node.exec_command(cmd=f"systemctl --type=service | grep {service_name}")
+    if err:
+        return None
+    return out.split(" ")[0]
+
+
+def set_service_state(node, service_id, state):
+    """
+    Sets the service to given state using systemctl
+    Args:
+        node (ceph): Node to execute the cmd
+        service_id: Service id
+        state: state [start /stop/ restart]
+
+    Returns (str): Service ID
+    """
+    _, err = node.exec_command(cmd=f"systemctl {state} {service_id}", sudo=True)
+    if err:
+        return False
+    return True
+
+
+def bring_node_offline(node, interface="eth0", timeout=120):
+    """
+    Brings a node offlibe by making network interface down for a defined time
+        Args:
+            node (ceph): Node at which the interface has to be bought down
+            interface (str): Node interface name ens3/eth0 etc.
+            timeout (int): Time duration (in secs) for which network has to
+                           be down
+        Returns (Thread): Thread object, None if failed
+        Example:
+            bring_node_offline(mon_node, installer_node, timout=120)
+    """
+    cmd = f"ifconfig {interface} down;sleep {timeout};ifconfig {interface} up"
+    thread = Thread(target=(lambda: node.exec_command(cmd=cmd, sudo=True)))
+    thread.start()
+
+    # Adding a sleep for network interface update to take place
+    sleep(3)
+
+    if is_node_online(node):
+        log.error(
+            f"{node.hostname} is online even after bringing the n/w interface down"
+        )
+        log.info("Waiting for the interface update command to complete")
+        thread.join()
+        return None
+
+    log.info(f"{node.hostname} is made offline for {timeout} seconds")
+    return thread
+
+
+def is_node_online(node):
+    """
+    Checks whether the given node is online. Uses ping to verify the node status
+    Args:
+        node (ceph): Node to be checked for online/offline status
+
+    Returns (bool): Based on if the node is online or not
+
+    """
+    cmd = ["ping", node.ip_address, "-c1", "-t1 "]
+    ping_proc = Popen(cmd, stdout=PIPE)
+    _, _ = ping_proc.communicate()
+    if not ping_proc.returncode:
+        log.info("{} is UP".format(node.ip_address))
+        return True
+    log.error(f"{node.hostname} is DOWN, Ping failed")
+    return False

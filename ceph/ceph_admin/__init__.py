@@ -9,6 +9,7 @@ scenarios for verifying and validating cephadm.
 """
 from typing import Dict
 
+from utility.install_prereq import SetupLicence
 from utility.log import Log
 
 from .bootstrap import BootstrapMixin
@@ -149,9 +150,7 @@ class CephAdmin(BootstrapMixin, ShellMixin):
 
         cmd = f"subscription-manager repos --enable={cdn_repo[os_major_version]}"
 
-        # Todo: Figure out a way to bail out CDN repo installation on clients
-        #       now clients go through installation, But need to avoid CDN repo enablement.
-        for node in self.cluster.get_nodes():
+        for node in self.cluster.get_nodes(ignore="client"):
             node.exec_command(sudo=True, cmd=cmd)
 
     def setup_upstream_repository(self, repo_url=None):
@@ -206,6 +205,8 @@ class CephAdmin(BootstrapMixin, ShellMixin):
             cmd += " --nogpghceck"
 
         for node in self.cluster.get_nodes(ignore="client"):
+            if self.config.get("ibm_build"):
+                SetupLicence.run(node)
             node.exec_command(
                 sudo=True,
                 cmd="yum install cephadm -y --nogpgcheck",
