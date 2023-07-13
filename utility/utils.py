@@ -1883,30 +1883,42 @@ def clone_the_repo(config, node, path_to_clone):
     node.exec_command(cmd=f"cd {path_to_clone} ; {git_clone_cmd}")
 
 
+# def calculate_available_storage(node):
+#     log.info("Calculate current storage present in cluster")
+#     out, err = node.exec_command(cmd="sudo ceph df --format json")
+#     import json
+#
+#     out = json.loads(out)
+#     return out["stats"]["total_avail_bytes"]
+
+
 def calculate_available_storage(node):
     import json
 
-    log.info("Calculate current storage present in cluster")
+    log.info(
+        "Calculate maximum storage that is available to be used."
+        + " It is the amount of data that can be used before the first OSD becomes full."
+        + " This is implicitly divided by replication factor or erasure code"
+    )
     out, err = node.exec_command(cmd="sudo radosgw-admin zone get --format json")
     out = json.loads(out)
     zone_name = out["name"]
     rgw_bucket_data_pool = f"{zone_name}.rgw.buckets.data"
     out, err = node.exec_command(cmd="sudo ceph df --format json")
-    ceph_df_json = json.loads(out)
     if rgw_bucket_data_pool not in out:
-        rgw_bucket_data_pool = ".rgw.root"
+        node.exec_command(cmd=f"sudo ceph osd pool create {rgw_bucket_data_pool} 64 64")
+        time.sleep(10)
+        out, err = node.exec_command(cmd="sudo ceph df --format json")
+    ceph_df_json = json.loads(out)
+    # Ceph uses below given formula to calculate MAX AVAIL value :
+    # [min(osd.avail for osd in OSD_up) - ( min(osd.avail for osd in OSD_up).total_size * (1 - mon_osd_full_ratio)) ]* len(osd.avail for osd in OSD_up) /pool.size()
+    # min(osd.avail for osd in OSD_up) : Minimum space left in an OSD in up set in pool crush ruleset and same what Sage has suggested in upstream tracker #13844 that your usage is bounded by osd.X.
+    # len(osd.avail for osd in OSD_up) : Number of OSDs in UP set in pool crush ruleset
+    # pool.size() : pool replication size
+    # refer https://access.redhat.com/solutions/2273951
     for pool in ceph_df_json["pools"]:
         if pool["name"] == rgw_bucket_data_pool:
-            # Ceph uses below given formula to calculate MAX AVAIL value :
-            # [min(osd.avail for osd in OSD_up) - ( min(osd.avail for osd in OSD_up).total_size * (1 - mon_osd_full_ratio)) ]* len(osd.avail for osd in OSD_up) /pool.size()
-            # min(osd.avail for osd in OSD_up) : Minimum space left in an OSD in up set in pool crush ruleset and same what Sage has suggested in upstream tracker #13844 that your usage is bounded by osd.X.
-            # len(osd.avail for osd in OSD_up) : Number of OSDs in UP set in pool crush ruleset
-            # pool.size() : pool replication size
-            # refer https://access.redhat.com/solutions/2273951
             return pool["stats"]["max_avail"]
-
-    # return out["stats"]["total_avail_bytes"]
-    # return out["pools"][0]["stats"]["max_avail"]
 
 
 def perform_env_setup(config, node, ceph_cluster):

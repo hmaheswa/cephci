@@ -161,7 +161,7 @@ def get_or_create_user(node: CephNode) -> Dict:
          Dictionary holding the keys user, access_key & secret_key
     """
     LOG.debug("Get or Create cosbench01 user using radosgw-admin.")
-    user = "cosbench01"
+    user = "cosbench03"
     try:
         out, err = node.exec_command(cmd=f"sudo radosgw-admin user info --uid {user}")
         out = loads(out)
@@ -196,6 +196,7 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
     drivers = get_nodes_by_ids(ceph_cluster, kwargs["config"]["drivers"]["hosts"])
 
     try:
+        client.exec_command(cmd="sudo yum install -y --nogpgcheck ceph-common")
         install(controllers)
         for ctrl in controllers:
             enable_ports(ctrl, port=19088)
