@@ -118,10 +118,11 @@ tests:
         ceph:
           config:
             set-env: true
+            run-on-rgw: true
             script-name: user_create.py
             config-file-name: non_tenanted_user.yaml
             timeout: 300
       desc: create non-tenanted user
-      module: sanity_rgw_multisite.py
+      module: sanity_rgw.py
       name: create non-tenanted user
       polarion-id: CEPH-83575199
