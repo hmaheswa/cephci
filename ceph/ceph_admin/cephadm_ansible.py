@@ -5,6 +5,9 @@ playbooks supported,
 - cephadm-purge-cluster.yaml
 - cephadm-clients.yaml
 """
+
+import re
+
 from ceph.ceph_admin.common import config_dict_to_string
 from utility.log import Log
 
@@ -39,10 +42,34 @@ class CephadmAnsible:
 
     def install_cephadm_ansible(self):
         """Enable ansible rpm repos and install cephadm-ansible."""
-        self.admin.exec_command(
-            cmd=f"subscription-manager repos --enable={ANSIBLE_RPM}",
-            sudo=True,
+        rhcs_version = re.match(
+            r"(\d)\.(.?)(.*)", str(self.cluster._Ceph__rhcs_version)
         )
+        if not rhcs_version:
+            raise CephadmAnsibleError(
+                f"Invalid string for RHCS version - '{self.cluster.__Ceph_rhcs_version}'"
+            )
+
+        rhcs_version = rhcs_version.groups(0)[0]
+        if float(rhcs_version) >= 6.0:
+            self.admin.exec_command(
+                cmd="yum install ansible-core -y --nogpgcheck",
+                sudo=True,
+            )
+        else:
+            # Remove ansible and ceph-ansible as per the latest doc (RHCS 5 Upgrade Guide[Section 2.8])
+            """Doc Link https://access.redhat.com/documentation/en-us/red_hat_ceph_storage/5/html/upgrade_guide
+            /upgrading-a-red-hat-ceph-storage-cluster-running-rhel-8-from-rhcs-4-to-rhcs-5
+            #installing-cephadm-ansible-on-an-upgraded-storage-cluster_assembly_upgrading-a-red-hat-ceph-storage-cluster
+            -running-rhel-8-from-rhcs-4-to-rhcs-5"""
+            self.admin.exec_command(
+                cmd="dnf remove ansible ceph-ansible -y",
+                sudo=True,
+            )
+            self.admin.exec_command(
+                cmd=f"subscription-manager repos --enable={ANSIBLE_RPM}",
+                sudo=True,
+            )
         self.admin.exec_command(
             cmd=f"yum install {self.rpm} -y --nogpgcheck",
             sudo=True,
@@ -107,4 +134,4 @@ class CephadmAnsible:
         )
 
         if rc != 0:
-            raise CephadmAnsibleError("Playbook {playbook} failed....")
+            raise CephadmAnsibleError(f"Playbook {playbook} failed....")

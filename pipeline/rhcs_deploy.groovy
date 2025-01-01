@@ -2,31 +2,38 @@
 
 def argsMap = [
     "4": [
-        "inventory": "conf/inventory/rhel-8.5-server-x86_64-large.yaml",
+        "inventory": "conf/inventory/rhel-8.7-server-x86_64-large.yaml",
         "globalConf": "conf/nautilus/integrations/7_node_ceph.yaml",
         "suite": "suites/nautilus/integrations/ocs.yaml",
         "platform": "rhel-8"
     ],
     "5": [
-        "inventory": "conf/inventory/rhel-8.5-server-x86_64-large.yaml",
+        "inventory": "conf/inventory/rhel-8.7-server-x86_64-large.yaml",
         "globalConf": "conf/pacific/integrations/7_node_ceph.yaml",
         "suite": "suites/pacific/integrations/ocs.yaml",
         "platform": "rhel-8",
         "rgwSecure": "suites/pacific/integrations/ocs_rgw_ssl.yaml",
     ],
     "6": [
-        "inventory": "conf/inventory/rhel-9.0-server-x86_64-large.yaml",
+        "inventory": "conf/inventory/rhel-9.4-server-x86_64-xlarge.yaml",
         "globalConf": "conf/quincy/integrations/7_node_ceph.yaml",
         "suite": "suites/quincy/integrations/ocs.yaml",
         "platform": "rhel-9",
-        "rgwSecure": "suites/quincy/integrations/ocs_rgw_ssl.yaml"
+        "rgwSecure": "suites/quincy/integrations/ocs_rgw_ssl.yaml",
+    ],
+    "7": [
+        "inventory": "conf/inventory/rhel-9.4-server-x86_64-xlarge.yaml",
+        "globalConf": "conf/reef/integrations/7_node_ceph.yaml",
+        "suite": "suites/reef/integrations/ocs.yaml",
+        "platform": "rhel-9",
+        "rgwSecure": "suites/reef/integrations/ocs_rgw_ssl.yaml",
     ]
 ]
 def ciMap = [:]
 def sharedLib
 def vmPrefix
 
-node ("rhel-8-medium || ceph-qe-ci") {
+node ("rhel-9-medium || ceph-qe-ci") {
 
     stage("prepareJenkinsAgent") {
         if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
@@ -64,13 +71,14 @@ node ("rhel-8-medium || ceph-qe-ci") {
         def cliArgs = ""
         ciMap = sharedLib.getCIMessageMap()
 
-        majorVersion = ciMap.build.substring(0,1)
+        majorVersion = ciMap.rhbuild.substring(0,1)
         clusterName = ciMap["cluster_name"]
+        def buildType = "${ciMap.build}" ?: "latest"
 
         // Prepare the CLI arguments
-        cliArgs += "--rhbuild ${ciMap.build}"
+        cliArgs += "--rhbuild ${ciMap.rhbuild}"
         cliArgs += " --platform ${argsMap[majorVersion]['platform']}"
-        cliArgs += " --build tier-0"
+        cliArgs += " --build ${buildType}"
         cliArgs += " --skip-sos-report"
         cliArgs += " --inventory ${argsMap[majorVersion]['inventory']}"
         cliArgs += " --global-conf ${argsMap[majorVersion]['globalConf']}"
@@ -79,6 +87,11 @@ node ("rhel-8-medium || ceph-qe-ci") {
             cliArgs += " --suite ${argsMap[majorVersion]['rgwSecure']}"
         } else {
             cliArgs += " --suite ${argsMap[majorVersion]['suite']}"
+        }
+
+        if ( argsMap[majorVersion].containsKey("overrides") ) {
+            def overrides = argsMap[majorVersion]['overrides']
+            overrides.each { k, v -> cliArgs += " --custom-config ${k}=${v}" }
         }
 
         println "Debug: ${cliArgs}"
@@ -99,7 +112,7 @@ node ("rhel-8-medium || ceph-qe-ci") {
             "artifact": [
                 "type": "product-build",
                 "name": "Red Hat Ceph Storage",
-                "nvr": "RHCEPH-${ciMap.build}",
+                "nvr": "RHCEPH-${ciMap.rhbuild}",
                 "phase": "integration",
             ],
             "extra": sutInfo,
@@ -108,8 +121,8 @@ node ("rhel-8-medium || ceph-qe-ci") {
                 "email": "cephci@redhat.com",
             ],
             "system": [
-                "os": "centos-7",
-                "label": "centos-7",
+                "os": "rhel-9",
+                "label": "rhel-9-medium",
                 "provider": "openstack",
             ],
             "pipeline": [

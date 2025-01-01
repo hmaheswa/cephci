@@ -90,6 +90,25 @@ KC_REALM = {{ data.webidentity.realm }}
 {% endif %}
 
 """
+S3CONF_ACC = """
+{%- if data.iamroot %}
+[iam root]
+display_name = {{ data.iamroot.name }}
+user_id = {{ data.iamroot.account_id }}
+access_key = {{ data.iamroot.access_key }}
+secret_key = {{ data.iamroot.secret_key }}
+email = {{ data.iamroot.email }}
+{% endif %}
+
+{%- if data.iamrootalt %}
+[iam alt root]
+display_name = {{ data.iamrootalt.name }}
+user_id = {{ data.iamrootalt.account_id }}
+access_key = {{ data.iamrootalt.access_key }}
+secret_key = {{ data.iamrootalt.secret_key }}
+email = {{ data.iamrootalt.email }}
+{% endif %}
+"""
 
 
 def run(**kw):
@@ -98,10 +117,16 @@ def run(**kw):
     cluster = kw["ceph_cluster"]
     config = kw.get("config")
     build = config.get("build", config.get("rhbuild"))
+    host = config.get("host")
+    secure = config.get("ssl", False)
+
     client_node = cluster.get_nodes(role="client")[0]
 
     execute_setup(cluster, config)
-    _, secure, _ = get_rgw_frontend(cluster)
+
+    if not host:
+        _, secure, _ = get_rgw_frontend(cluster)
+
     exit_status = execute_s3_tests(client_node, build, secure)
     execute_teardown(cluster, build)
 
@@ -129,15 +154,21 @@ def execute_setup(cluster: Ceph, config: dict) -> None:
         CommandFailed:  When a remote command returned non-zero value.
     """
     build = config.get("build", config.get("rhbuild"))
+    secure = config.get("ssl", False)
+    host = config.get("host")
+    port = config.get("port")
+
     client_node = cluster.get_nodes(role="client")[0]
     rgw_node = cluster.get_nodes(role="rgw")[0]
 
-    branch = config.get("branch", "ceph-luminous")
+    branch = config.get("branch", "ceph-quincy")
     clone_s3_tests(node=client_node, branch=branch)
     install_s3test_requirements(client_node, branch, os_ver=build[-1])
 
-    host = rgw_node.shortname
-    lib, secure, port = get_rgw_frontend(cluster)
+    if not all([host, port]):
+        host = rgw_node.shortname
+        lib, secure, port = get_rgw_frontend(cluster)
+
     kms_keyid = config.get("kms_keyid")
     create_s3_conf(cluster, build, host, port, secure, kms_keyid)
 
@@ -165,7 +196,7 @@ def execute_s3_tests(node: CephNode, build: str, encryption: bool = False) -> in
         extra_args = "-a '!fails_on_rgw,!fails_strict_rfc2616,!encryption'"
         tests = "s3tests"
 
-        if build.startswith("5"):
+        if not build.split(".")[0] >= "7":
             extra_args = "-a '!fails_on_rgw,!fails_strict_rfc2616"
 
             if not encryption:
@@ -173,6 +204,15 @@ def execute_s3_tests(node: CephNode, build: str, encryption: bool = False) -> in
 
             extra_args += ",!test_of_sts,!s3select,!user-policy,!webidentity_test'"
             tests = "s3tests_boto3"
+
+        else:
+            base_cmd = "cd s3-tests; S3TEST_CONF=config.yaml virtualenv/bin/tox"
+            extra_args = "-- -v -m 'not fails_on_rgw and not fails_strict_rfc2616"
+            tests = "s3tests_boto3"
+
+            if not encryption:
+                extra_args += " and not encryption"
+            extra_args += " and not user-policy and not webidentity_test'"
 
         cmd = f"{base_cmd} {extra_args} {tests}"
         return node.exec_command(cmd=cmd, long_running=True)
@@ -312,9 +352,22 @@ def create_s3_user(node: CephNode, user_prefix: str, data: Dict) -> None:
     uid = binascii.hexlify(os.urandom(32)).decode()
     display_name = f"{user_prefix}-user"
     log.info("Creating user: {display_name}".format(display_name=display_name))
+    if display_name == "iamrootalt-user":
+        cmd = (
+            f"radosgw-admin user create --uid=iamrootalt-user "
+            f"--account-id RGW22222222222222222 --account-root "
+            f"--display_name={display_name} --email={display_name}@foo.bar"
+        )
+    elif display_name == "iamroot-user":
+        cmd = (
+            f"radosgw-admin user create --uid=iamroot-user "
+            f"--account-id RGW11111111111111111 --account-root "
+            f"--display_name={display_name} --email={display_name}@foo.bar"
+        )
+    else:
 
-    cmd = f"radosgw-admin user create --uid={uid} --display_name={display_name}"
-    cmd += " --email={email}@foo.bar".format(email=uid)
+        cmd = f"radosgw-admin user create --uid={uid} --display_name={display_name}"
+        cmd += " --email={email}@foo.bar".format(email=uid)
 
     out, err = node.exec_command(sudo=True, cmd=cmd)
     user_info = json.loads(out)
@@ -326,6 +379,22 @@ def create_s3_user(node: CephNode, user_prefix: str, data: Dict) -> None:
         "name": user_info["display_name"],
         "email": user_info["email"],
     }
+    if display_name == "iamrootalt-user" or "iamroot-user":
+        data[user_prefix] = {
+            "id": user_info["keys"][0]["user"],
+            "access_key": user_info["keys"][0]["access_key"],
+            "secret_key": user_info["keys"][0]["secret_key"],
+            "name": user_info["display_name"],
+            "email": user_info["email"],
+            "account_id": user_info["account_id"],
+        }
+
+    if user_prefix == "iam":
+        log.info("Adding user-policy caps for IAM user")
+        cmd = f'radosgw-admin caps add --uid={uid} --caps="user-policy=*"'
+        out, err = node.exec_command(sudo=True, cmd=cmd)
+        cmd = f'radosgw-admin caps add --uid={uid} --caps="roles=*"'
+        out, err = node.exec_command(sudo=True, cmd=cmd)
 
 
 def create_s3_conf(
@@ -353,15 +422,23 @@ def create_s3_conf(
     rgw_node = cluster.get_nodes(role="rgw")[0]
     client_node = cluster.get_nodes(role="client")[0]
 
-    if build.startswith("5"):
+    if not build.startswith("4"):
         rgw_node = client_node
 
     create_s3_user(node=rgw_node, user_prefix="main", data=data)
     create_s3_user(node=rgw_node, user_prefix="alt", data=data)
     create_s3_user(node=rgw_node, user_prefix="tenant", data=data)
+    create_s3_user(node=rgw_node, user_prefix="iam", data=data)
+    create_s3_user(node=rgw_node, user_prefix="iamroot", data=data)
+    create_s3_user(node=rgw_node, user_prefix="iamrootalt", data=data)
 
     if kms_keyid:
         data["main"]["kms_keyid"] = kms_keyid
+
+    global S3CONF
+    global S3CONF_ACC
+    if build.split(".")[0] >= "8":
+        S3CONF = S3CONF + S3CONF_ACC
 
     templ = Template(S3CONF)
     _config = templ.render(data=data)
@@ -383,11 +460,11 @@ def add_lc_debug(cluster: Ceph, build: str) -> None:
         CommandFailed:  Whenever a command returns a non-zero value part of the method.
     """
     log.debug("Setting the lifecycle interval for all RGW daemons")
-    if build.startswith("5"):
-        _rgw_lc_debug(cluster, add=True)
+    if build.startswith("4"):
+        _rgw_lc_debug_conf(cluster, add=True)
         return
 
-    _rgw_lc_debug_conf(cluster, add=True)
+    _rgw_lc_debug(cluster, add=True)
 
 
 def del_lc_debug(cluster: Ceph, build: str) -> None:
@@ -402,11 +479,11 @@ def del_lc_debug(cluster: Ceph, build: str) -> None:
         CommandFailed:  Whenever a command returns a non-zero value part of the method.
     """
     log.debug("Removing the lifecycle configuration")
-    if build.startswith("5"):
-        _rgw_lc_debug(cluster, add=False)
+    if build.startswith("4"):
+        _rgw_lc_debug_conf(cluster, add=False)
         return
 
-    _rgw_lc_debug_conf(cluster, add=False)
+    _rgw_lc_debug(cluster, add=False)
 
 
 # Private functions
@@ -542,13 +619,19 @@ def _rgw_lc_debug(cluster: Ceph, add: bool = True) -> None:
     for daemon in rgw_daemons:
         if add:
             command = f"ceph config set {daemon} rgw_lc_debug_interval 10"
+            command_1 = f"ceph config set {daemon} rgw_sts_key abcdefghijklmnop"
+            command_2 = f"ceph config set {daemon} rgw_s3_auth_use_sts true"
         else:
             command = f"ceph config rm {daemon} rgw_lc_debug_interval"
+            command_1 = f"ceph config rm {daemon} rgw_sts_key"
+            command_2 = f"ceph config rm {daemon} rgw_s3_auth_use_sts"
 
         node.exec_command(sudo=True, cmd=command)
+        node.exec_command(sudo=True, cmd=command_1)
+        node.exec_command(sudo=True, cmd=command_2)
 
     for service in rgw_services:
         node.exec_command(sudo=True, cmd=f"ceph orch restart {service}")
 
     # Restart can take time
-    sleep(60)
+    sleep(30)

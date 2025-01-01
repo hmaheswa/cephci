@@ -21,6 +21,7 @@ Requirement parameters
 Entry Point:
     def run(**kwargs):
 """
+
 import importlib
 import os
 from time import sleep
@@ -68,11 +69,19 @@ def execute(test, args, results: dict):
     """
 
     test = test.get("test")
-    config = test.get("config", dict())
+    if "clusters" in test:
+        log.info("Its a multisite setup")
+        cluster = test["clusters"].get(
+            "ceph-rgw1", test["clusters"][list(test["clusters"].keys())[0]]
+        )
+        config = cluster["config"]
+    else:
+        config = test.get("config", dict())
     config.update(args["config"])
     file_name = test.get("module")
     mod_file_name = os.path.splitext(file_name)[0]
     test_mod = importlib.import_module(mod_file_name)
+    testcase_name = test.get("name", "Test Case Unknown")
 
     rc = test_mod.run(
         ceph_cluster=args["ceph_cluster"],
@@ -83,5 +92,5 @@ def execute(test, args, results: dict):
         clients=args["clients"],
     )
 
-    file_string = f"{test_mod}"
+    file_string = f"{testcase_name}"
     results.update({file_string: rc})

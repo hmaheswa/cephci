@@ -1,13 +1,16 @@
 """Module that allows QE to interface with cephadm bootstrap CLI."""
+
 import json
 import tempfile
+from distutils.version import LooseVersion
 from typing import Dict
 
-from ceph.ceph import ResourceNotFoundError
 from ceph.ceph_admin.cephadm_ansible import CephadmAnsible
+from ceph.utils import get_node_by_id, get_public_network, setup_repos
 from utility.log import Log
 from utility.utils import fetch_build_artifacts, get_cephci_config
 
+from ..ceph import ResourceNotFoundError
 from .common import config_dict_to_string
 from .helper import GenerateServiceSpec, create_ceph_config_file, validate_spec_services
 from .typing_ import CephAdmProtocol
@@ -20,7 +23,9 @@ __DEFAULT_KEYRING_PATH = "/etc/ceph/ceph.client.admin.keyring"
 __DEFAULT_SSH_PATH = "/etc/ceph/ceph.pub"
 
 
-def construct_registry(cls, registry: str, json_file: bool = False):
+def construct_registry(
+    cls, registry: str, json_file: bool = False, ibm_build: bool = False
+):
     """
     Construct registry credentials for bootstrapping cluster
 
@@ -40,8 +45,12 @@ def construct_registry(cls, registry: str, json_file: bool = False):
         constructed string of registry credentials ( Str )
     """
     # Todo: Retrieve credentials based on registry name
+    build_type = "ibm" if ibm_build else "rh"
+
     _config = get_cephci_config()
-    cdn_cred = _config.get("registry_credentials", _config["cdn_credentials"])
+    cdn_cred = _config.get(
+        f"{build_type}_registry_credentials", _config["cdn_credentials"]
+    )
     reg_args = {
         "registry-url": cdn_cred.get("registry", registry),
         "registry-username": cdn_cred.get("username"),
@@ -190,6 +199,9 @@ class BootstrapMixin:
         custom_image = args.pop("custom_image", True)
         build_type = self.config.get("build_type")
         rhbuild = self.config.get("rhbuild")
+        base_url = self.config.get("base_url")
+        cloud_type = self.config.get("cloud-type", "openstack")
+        ibm_build = self.config.get("ibm_build", False)
 
         # Support installation of the baseline cluster whose version is not available in
         # CDN. This is primarily used for an upgrade scenario. This support is currently
@@ -204,26 +216,34 @@ class BootstrapMixin:
             # an upgrade occurs. This enables us to execute the test in the right
             # context.
             self.config["base_url"] = _details[0]
-            self.config[
-                "container_image"
-            ] = f"{_details[1]}/{_details[2]}:{_details[3]}"
+            self.config["container_image"] = (
+                f"{_details[1]}/{_details[2]}:{_details[3]}"
+            )
             self.cluster.rhcs_version = _rhcs_version
             rhbuild = f"{_rhcs_version}-{_platform}"
+            base_url = _details[0]
 
+        self.cluster.rhcs_version = _rhcs_version or rhbuild
         if build_type == "upstream":
             self.setup_upstream_repository()
-            logger.info(
-                "Enabling cdn tool repo to workaround ",
-                "unavailability of ceph x86_64 RPM pkgs in upstream builds",
-            )
-            self.set_cdn_tool_repo()
         elif build_type == "released" or custom_repo.lower() == "cdn":
             custom_image = False
-            self.set_cdn_tool_repo()
+            self.set_cdn_tool_repo(_rhcs_version)
+            self.cluster.use_cdn = True
         elif custom_repo:
             self.set_tool_repo(repo=custom_repo)
         else:
-            self.set_tool_repo()
+            repos = ["Tools"]
+            _platform = "-".join(rhbuild.split("-")[1:])
+            for node in self.cluster.get_nodes():
+                setup_repos(
+                    ceph=node,
+                    base_url=base_url,
+                    platform=_platform,
+                    repos=repos,
+                    cloud_type=cloud_type,
+                    ibm_build=ibm_build,
+                )
 
         ansible_run = config.get("cephadm-ansible", None)
         if ansible_run:
@@ -250,12 +270,14 @@ class BootstrapMixin:
 
         # Construct registry credentials as string or json.
         registry_url = args.pop("registry-url", None)
-        if registry_url:
-            cmd += construct_registry(self, registry_url)
+        if registry_url or ibm_build:
+            cmd += construct_registry(self, registry_url, ibm_build=ibm_build)
 
         registry_json = args.pop("registry-json", None)
         if registry_json:
-            cmd += construct_registry(self, registry_json, json_file=True)
+            cmd += construct_registry(
+                self, registry_json, json_file=True, ibm_build=ibm_build
+            )
 
         """ Generate dashboard certificate and key if bootstrap cli
             have this options as dashboard-key and dashboard-crt """
@@ -273,29 +295,21 @@ class BootstrapMixin:
 
         # Todo: need to switch installer node on any other node name provided
         #       other than installer node
-        mon_node = args.pop("mon-ip", self.installer.node.shortname)
-        if mon_node:
-            for node in self.cluster.get_nodes():
-                # making sure conditions works in all the scenario
-                if (
-                    node.shortname == mon_node
-                    or node.shortname.endswith(mon_node)
-                    or f"{mon_node}-" in node.shortname
-                ):
-                    cmd += f" --mon-ip {node.ip_address}"
-                    break
-            else:
-                raise ResourceNotFoundError(f"Unknown {mon_node} node name.")
+        mon_node = get_node_by_id(
+            self.cluster, args.pop("mon-ip", self.installer.node.shortname)
+        )
+        if not mon_node:
+            raise ResourceNotFoundError(f"Unknown {mon_node} node name.")
+        cmd += f" --mon-ip {mon_node.ip_address}"
 
-        # apply-spec
+        # Bootstrap with Ceph service specification
         specs = args.get("apply-spec")
         if specs:
-            spec_cls = GenerateServiceSpec(
+            args["apply-spec"] = GenerateServiceSpec(
                 node=self.installer, cluster=self.cluster, specs=specs
-            )
-            args["apply-spec"] = spec_cls.create_spec_file()
+            ).create_spec_file()
 
-        # config
+        # Bootstrap with ceph config options like ceph.conf file
         conf = args.get("config")
         if conf:
             args["config"] = create_ceph_config_file(node=self.installer, config=conf)
@@ -316,7 +330,6 @@ class BootstrapMixin:
 
         logger.info("Bootstrap output : %s", out)
         logger.error("Bootstrap error: %s", err)
-
         # The path to ssh public key mentioned in either output-pub-ssh-key or
         # ssh-public-key options will be considered for distributing the ssh public key,
         # if these are not specified, then the default ssh key path /etc/ceph/ceph.pub
@@ -330,7 +343,11 @@ class BootstrapMixin:
         copy_ceph_configuration_files(self, args)
 
         # Check for image overrides
-        if self.config.get("overrides"):
+        if (
+            self.config.get("overrides")
+            and build_type != "released"
+            and custom_repo.lower() != "cdn"
+        ):
             override_dict = dict(item.split("=") for item in self.config["overrides"])
             supported_overrides = [
                 "grafana",
@@ -339,7 +356,24 @@ class BootstrapMixin:
                 "prometheus",
                 "node_exporter",
                 "alertmanager",
+                "snmp_gateway",
             ]
+            if self.cluster.rhcs_version >= LooseVersion("6.0"):
+                supported_overrides += [
+                    "promtail",
+                    "loki",
+                ]
+            if self.cluster.rhcs_version >= LooseVersion("7.0"):
+                supported_overrides += [
+                    "nvmeof",
+                ]
+            if self.cluster.rhcs_version >= LooseVersion("8.0"):
+                supported_overrides += [
+                    "samba",
+                    "samba_metrics",
+                    "nginx",
+                    "oauth2_proxy",
+                ]
 
             for image in supported_overrides:
                 image_key = f"{image}_image"
@@ -353,14 +387,51 @@ class BootstrapMixin:
         # https://docs.ceph.com/en/latest/rados/configuration/network-config-ref/
         public_nws = self.cluster.get_public_networks()
         cluster_nws = self.cluster.get_cluster_networks()
+
+        # Todo: Temporary fix issue for RHCEPHQE-6072
+        # Todo: get network address(es) from node rather than config.
+        # Todo: remove this code commit once we have network config from node_obj.
+        if config.get("update_public_nw", True):
+            public_nws = ",".join(
+                [public_nws, get_public_network(self.cluster.get_nodes())]
+            )
+            public_nws = ",".join(filter(lambda x: x, list(set(public_nws.split(",")))))
+
         if public_nws:
+            # Refer:
+            # - https://bugzilla.redhat.com/show_bug.cgi?id=2314438
+            # - https://bugzilla.redhat.com/show_bug.cgi?id=2156919
+            # - https://access.redhat.com/solutions/7088483
+            # Todo: update public network config level to global for 6.x and 7.x when changes are in
+            # 6.x tracker: https://bugzilla.redhat.com/show_bug.cgi?id=2314604
+            # 7.x tracker: https://bugzilla.redhat.com/show_bug.cgi?id=2314606
+            config_level = "global" if rhbuild.split(".")[0] >= "8" else "mon"
             self.shell(
-                args=["ceph", "config", "set", "global public_network", public_nws]
+                args=[
+                    "ceph",
+                    "config",
+                    "set",
+                    f"{config_level} public_network",
+                    public_nws,
+                ]
             )
         if cluster_nws:
             self.shell(
                 args=["ceph", "config", "set", "global cluster_network", cluster_nws]
             )
+        if self.cluster.rhcs_version >= LooseVersion("8.0"):
+            wa_txt = """
+            Disabling the balancer module as a WA for bug : https://bugzilla.redhat.com/show_bug.cgi?id=2314146
+            Issue : If any mgr module based operation is performed right after mgr failover, The command execution fails
+            as the module isn't loaded by mgr daemon. Issue was identified to be with Balancer module.
+            Disabling automatic balancing on the cluster as a WA until we get the fix for the same.
+            Disabling balancer should unblock Upgrade tests.
+            Error snippet :
+    Error ENOTSUP: Warning: due to ceph-mgr restart, some PG states may not be up to date
+    Module 'crash' is not enabled/loaded (required by command 'crash ls'): use `ceph mgr module enable crash` to enable
+            """
+            logger.info(wa_txt)
+            self.shell(args=["ceph balancer off"])
 
         # validate spec file
         if specs:

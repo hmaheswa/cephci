@@ -6,9 +6,12 @@ def cephVersion
 def composeUrl
 def containerImage
 def releaseMap = [:]
+def failureReason = ""
+def cimsg = ""
+def emailLib
 
 // Pipeline script entry point
-node("rhel-8-medium || ceph-qe-ci") {
+node("rhel-9-medium || ceph-qe-ci") {
 
     try {
 
@@ -39,7 +42,8 @@ node("rhel-8-medium || ceph-qe-ci") {
                 poll: false
             )
             sharedLib = load("${env.WORKSPACE}/pipeline/vars/v3.groovy")
-            sharedLib.prepareNode(1)
+            emailLib = load("${env.WORKSPACE}/pipeline/vars/email.groovy")
+            sharedLib.prepareNode()
         }
 
         stage("updateRecipeFile") {
@@ -47,7 +51,7 @@ node("rhel-8-medium || ceph-qe-ci") {
             def majorVersion = versions.major_version
             def minorVersion = versions.minor_version
 
-            def cimsg = sharedLib.getCIMessageMap()
+            cimsg = sharedLib.getCIMessageMap()
             def repoDetails = cimsg.build.extra.image
 
             containerImage = repoDetails.index.pull.find({ x -> !(x.contains("sha")) })
@@ -118,26 +122,50 @@ node("rhel-8-medium || ceph-qe-ci") {
 
             sharedLib.SendUMBMessage(msgContent, overrideTopic, "ProductBuildDone")
             println "Updated UMB Message Successfully"
+            currentBuild.result = "SUCCESS"
         }
-    } catch(Exception err) {
-        if (currentBuild.result != "ABORTED") {
-            // notify about failure
-            currentBuild.result = "FAILURE"
-            def failureReason = err.getMessage()
-            def subject =  "[CEPHCI-PIPELINE-ALERT] [JOB-FAILURE] - ${env.JOB_NAME}/${env.BUILD_NUMBER}"
-            def body = "<body><h3><u>Job Failure</u></h3></p>"
-            body += "<dl><dt>Jenkins Build:</dt><dd>${env.BUILD_URL}</dd>"
-            body += "<dt>Failure Reason:</dt><dd>${failureReason}</dd></dl></body>"
 
-            emailext (
-                mimeType: 'text/html',
-                subject: "${subject}",
-                body: "${body}",
-                from: "cephci@redhat.com",
-                to: "cephci@redhat.com"
-            )
-            subject += "\n Jenkins URL: ${env.BUILD_URL}"
-            googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
+        stage("Trigger pipeline tier executor") {
+            def buildType = "rc"
+            def tags = "sanity,tier-0,stage-1,openstack"
+            def overrides = [:]
+            def overridesStr = writeJSON returnText: true, json: overrides
+
+            rhcephVersion = "RHCEPH-${versions.major_version}.${versions.minor_version}"
+            def recipeFileContent = sharedLib.yamlToMap("${rhcephVersion}.yaml")
+            def content = recipeFileContent['rc']
+            def buildArtifacts = writeJSON returnText: true, json: content
+            println "recipeFile ceph-version : ${content['ceph-version']}"
+            println "Starting test execution with parameters:"
+            println "\trhcephVersion: ${rhcephVersion}\n\tbuildType: ${buildType}\n\tbuildArtifacts: ${buildArtifacts}\n\toverrides: ${overrides}\n\ttags: ${tags}"
+
+             build ([
+                wait: false,
+                job: "rhceph-test-execution-pipeline",
+                parameters: [
+                    string(name: 'rhcephVersion', value: rhcephVersion.toString()),
+                    string(name: 'tags', value: tags),
+                    string(name: 'buildType', value: buildType),
+                    string(name: 'overrides', value: overridesStr),
+                    string(name: 'buildArtifacts', value: buildArtifacts.toString())]
+            ])
         }
+
+    } catch(Exception err) {
+        failureReason = err.getMessage()
+        if (currentBuild.result != "ABORTED") {
+            currentBuild.result = "FAILURE"
+            println "Failure Reason: ${failureReason}"
+        }
+    } finally {
+        rhcephVersion = "RHCEPH-${versions.major_version}.${versions.minor_version}"
+        composeInfo = [
+            "composeLabel": "${releaseMap.rc.'compose-label'}",
+            "containerImage": containerImage
+        ]
+        def subject = "${env.JOB_NAME} ${currentBuild.result} for ${rhcephVersion} - ${cephVersion} (RC) Release Candidate build"
+        // emailLib.sendEmailForListener(rhcephVersion, cephVersion, composeInfo, cimsg, failureReason, subject)
+        subject += "\n Jenkins URL: ${env.BUILD_URL}"
+        // googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
     }
 }

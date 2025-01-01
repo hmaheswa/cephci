@@ -39,7 +39,13 @@ def run(ceph_cluster, **kw):
     2. Delete subvolumegroup
     """
     try:
-        fs_util = FsUtils(ceph_cluster)
+        test_data = kw.get("test_data")
+        fs_util = FsUtils(ceph_cluster, test_data=test_data)
+        erasure = (
+            FsUtils.get_custom_config_value(test_data, "erasure")
+            if test_data
+            else False
+        )
         config = kw.get("config")
         clients = ceph_cluster.get_ceph_objects("client")
         build = config.get("build", config.get("rhbuild"))
@@ -51,15 +57,15 @@ def run(ceph_cluster, **kw):
                 f"This test requires minimum 1 client nodes.This has only {len(clients)} clients"
             )
             return 1
-        default_fs = "cephfs"
+        default_fs = "cephfs" if not erasure else "cephfs-ec"
         mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
         )
         client1 = clients[0]
-        fs_details = fs_util.get_fs_info(client1)
+        fs_details = fs_util.get_fs_info(client1, default_fs)
         if not fs_details:
-            fs_util.create_fs(client1, "cephfs")
+            fs_util.create_fs(client1, default_fs)
         subvolumegroup_list = [
             {"vol_name": default_fs, "group_name": "subvolgroup_full_vol_1"},
         ]
@@ -84,6 +90,7 @@ def run(ceph_cluster, **kw):
             kernel_mounting_dir_1,
             ",".join(mon_node_ips),
             sub_dir=f"{subvol_path.strip()}",
+            extra_params=f",fs={default_fs}",
         )
         client1.exec_command(
             sudo=True,
@@ -92,9 +99,14 @@ def run(ceph_cluster, **kw):
             f"{kernel_mounting_dir_1}",
             long_running=True,
         )
+        client1.exec_command(
+            sudo=True,
+            cmd=f"dd if=/dev/zero of={kernel_mounting_dir_1}/file_5gb bs=1M count=5000",
+            long_running=True,
+        )
         c_out2, c_err2 = client1.exec_command(
             sudo=True,
-            cmd="ceph fs subvolume info cephfs subvol_full_vol --group_name subvolgroup_full_vol_1 -f json",
+            cmd=f"ceph fs subvolume info {default_fs} subvol_full_vol --group_name subvolgroup_full_vol_1 -f json",
         )
         c_out2_result = json.loads(c_out2)
         log.info(c_out2_result)
@@ -119,7 +131,7 @@ def run(ceph_cluster, **kw):
             "group_name": "subvolgroup_full_vol_1",
         }
         fs_util.create_clone(client1, **full_vol_1)
-        fs_util.validate_clone_state(client1, full_vol_1, timeout=600)
+        fs_util.validate_clone_state(client1, full_vol_1, timeout=1200)
         clonevol_path, rc = client1.exec_command(
             sudo=True,
             cmd=f"ceph fs subvolume getpath {default_fs} "
@@ -129,7 +141,7 @@ def run(ceph_cluster, **kw):
         fs_util.fuse_mount(
             [client1],
             fuse_mounting_dir_2,
-            extra_params=f" -r {clonevol_path.strip()}",
+            extra_params=f" -r {clonevol_path.strip()} --client_fs {default_fs}",
         )
         client1.exec_command(
             sudo=True, cmd=f"diff -qr {kernel_mounting_dir_1} {fuse_mounting_dir_2}"
@@ -145,8 +157,9 @@ def run(ceph_cluster, **kw):
             {"vol_name": default_fs, "subvol_name": "full_vol_1"},
         ]
         for clone_vol in rmclone_list:
-            fs_util.remove_subvolume(client1, **clone_vol)
-        fs_util.remove_snapshot(client1, **snapshot, validate=False, check_ec=False)
+            fs_util.remove_subvolume(client1, **clone_vol, force=True, validate=False)
+        if locals().get("snapshot", None):
+            fs_util.remove_snapshot(client1, **snapshot, validate=False, check_ec=False)
         fs_util.remove_subvolume(client1, **subvolume, validate=False, check_ec=False)
         for subvolumegroup in subvolumegroup_list:
             fs_util.remove_subvolumegroup(client1, **subvolumegroup, force=True)

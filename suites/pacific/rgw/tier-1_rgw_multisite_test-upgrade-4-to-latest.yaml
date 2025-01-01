@@ -1,4 +1,4 @@
-# Polarion ID: CEPH-83574664
+# Polarion ID: CEPH-83574647
 # Objective: Testing Multisite upgrade from RHCS 4 GA to RHCS 5 latest development build.
 # conf: rgw_multisite.yaml
 # platform: rhel-8
@@ -31,7 +31,15 @@ tests:
               ceph_docker_image_tag: latest
               ceph_docker_registry: registry.redhat.io
               copy_admin_key: true
-              dashboard_enabled: false
+              dashboard_enabled: true
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
               rgw_multisite: true
               rgw_zone: US_EAST
               rgw_zonegroup: US
@@ -61,7 +69,15 @@ tests:
               ceph_docker_image_tag: latest
               ceph_docker_registry: registry.redhat.io
               copy_admin_key: true
-              dashboard_enabled: false
+              dashboard_enabled: true
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
               rgw_multisite: true
               rgw_zone: US_WEST
               rgw_zonegroup: US
@@ -77,7 +93,7 @@ tests:
               rgw_pull_proto: http
               rgw_pull_port: 8080
       desc: Deploying Ceph multisite RGW cluster using ceph-ansible
-      polarion-id: CEPH-83574664
+      polarion-id: CEPH-83575224
       module: test_ansible.py
       name: deploy ceph multisite cluster from cdn
 
@@ -90,6 +106,7 @@ tests:
             config-file-name: non_tenanted_user.yaml
             copy-user-info-to-site: ceph-sec
             timeout: 300
+            run-on-rgw: true
       desc: create non-tenanted user
       module: sanity_rgw_multisite.py
       polarion-id: CEPH-83575199
@@ -105,6 +122,7 @@ tests:
             config-file-name: test_Mbuckets_with_Nobjects.yaml
             verify-io-on-site: ["ceph-sec"]
             timeout: 300
+            run-on-rgw: true
       desc: test to create "M" no of buckets and "N" no of objects
       module: sanity_rgw_multisite.py
       name: Test M buckets with N objects pre upgrade
@@ -118,6 +136,7 @@ tests:
             config-file-name: test_Mbuckets_with_Nobjects_multipart.yaml
             verify-io-on-site: ["ceph-sec"]
             timeout: 300
+            run-on-rgw: true
       desc: test to create "M" buckets and "N" objects with multipart upload
       module: sanity_rgw_multisite.py
       name: Test multipart upload of M buckets with N objects pre upgrade
@@ -131,6 +150,7 @@ tests:
             config-file-name: test_swift_basic_ops.yaml
             verify-io-on-site: ["ceph-sec"]
             timeout: 300
+            run-on-rgw: true
       desc: Test object operations with swift
       module: sanity_rgw_multisite.py
       name: Swift based tests
@@ -145,6 +165,7 @@ tests:
             script-name: test_bucket_listing.py
             config-file-name: test_bucket_listing_flat_ordered.yaml
             timeout: 300
+            run-on-rgw: true
       desc: test duration for ordered listing of bucket with top level objects
       module: sanity_rgw_multisite.py
       name: test ordered listing of buckets pre upgrade
@@ -157,6 +178,7 @@ tests:
             script-name: test_bucket_listing.py
             config-file-name: test_bucket_listing_flat_unordered.yaml
             timeout: 300
+            run-on-rgw: true
       desc: test duration for unordered listing of buckets with top level objects
       module: sanity_rgw_multisite.py
       name: test unordered listing of buckets pre upgrade
@@ -170,6 +192,7 @@ tests:
             config-file-name: test_multisite_dynamic_resharding_brownfield.yaml
             verify-io-on-site: ["ceph-pri", "ceph-sec"]
             timeout: 300
+            run-on-rgw: true
       desc: Create bucket for Testing dynamic resharding brownfield scenario after upgrade
       module: sanity_rgw_multisite.py
       name: Create bucket for Testing dynamic resharding brownfield scenario after upgrade
@@ -183,10 +206,24 @@ tests:
             config-file-name: test_multisite_manual_resharding_brownfield.yaml
             verify-io-on-site: ["ceph-pri", "ceph-sec"]
             timeout: 300
+            run-on-rgw: true
       desc: Create bucket for Testing manual resharding brownfield scenario after upgrade
       module: sanity_rgw_multisite.py
       name: Create bucket for Testing manual resharding brownfield scenario after upgrade
       polarion-id: CEPH-83574735
+
+#  datalog offload tests
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_data_omap_offload.py
+            config-file-name: test_data_omap_offload_change_datatype_fifo.yaml
+            timeout: 300
+      desc: change datalog type to fifo before upgrade
+      module: sanity_rgw_multisite.py
+      name: change datalog type to fifo before upgrade
+      polarion-id: CEPH-83573696
 
   # Performing cluster upgrade
 
@@ -206,7 +243,15 @@ tests:
               osd_auto_discovery: false
               containerized_deployment: true
               copy_admin_key: true
-              dashboard_enabled: false
+              dashboard_enabled: True
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-5-dashboard-rhel8:5
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
               rgw_multisite: true
               rgw_zone: US_EAST
               rgw_zonegroup: US
@@ -232,7 +277,15 @@ tests:
               osd_auto_discovery: false
               containerized_deployment: true
               copy_admin_key: true
-              dashboard_enabled: false
+              dashboard_enabled: True
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-5-dashboard-rhel8:5
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
               rgw_multisite: true
               rgw_zone: US_WEST
               rgw_zonegroup: US
@@ -259,6 +312,7 @@ tests:
       clusters:
         ceph-pri:
           config:
+            set-env: true
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects_delete.yaml
             timeout: 300
@@ -339,7 +393,7 @@ tests:
       desc: Check DBR feature enabled on upgraded cluster
       abort-on-fail: true
       module: sanity_rgw_multisite.py
-      polarion-id: CEPH-83573596
+      polarion-id: CEPH-83574628
       clusters:
         ceph-pri:
           config:
@@ -401,3 +455,28 @@ tests:
       module: sanity_rgw_multisite.py
       name: Manual Resharding tests on Primary cluster
       polarion-id: CEPH-83574734
+  - test:
+      name: Test DBR reshard list and cancel command on primary
+      desc: Test DBR reshard list and cancel command on primary
+      polarion-id: CEPH-83573590
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name:  test_Mbuckets_with_Nobjects.py
+            config-file-name:  test_Mbuckets_with_Nobjects_reshard_cancel_cmd.yaml
+            timeout: 300
+            verify-io-on-site: ["ceph-sec"]
+
+#  datalog offload tests
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_data_omap_offload.py
+            config-file-name: test_data_omap_offload.yaml
+            timeout: 300
+      desc: verify datalog type is fifo after upgrade
+      module: sanity_rgw_multisite.py
+      name: verify datalog type is fifo after upgrade
+      polarion-id: CEPH-83573697

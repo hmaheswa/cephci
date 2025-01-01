@@ -22,6 +22,7 @@ globals:
           - node-exporter
           - alertmanager
           - crash
+          - nfs
       node3:
         role:
           - osd
@@ -50,15 +51,16 @@ globals:
           - mds
           - node-exporter
           - crash
+          - nfs
       node7:
+        role:
+          - client
+      node8:
         role:
           - mon
           - rgw
           - node-exporter
           - crash
-      node8:
-        role:
-          - client
       node9:
         role:
           - osd

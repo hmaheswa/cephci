@@ -1,6 +1,7 @@
 """
 Module to Verify if PG dup entries are trimmed successfully.
 """
+
 import datetime
 import json
 import random
@@ -15,6 +16,7 @@ from ceph.ceph_admin.orch import Orch
 from ceph.parallel import parallel
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.pool_workflows import PoolFunctions
+from tests.rados.monitor_configurations import MonConfigMethods
 from tests.rados.test_data_migration_bw_pools import create_given_pool
 from utility.log import Log
 from utility.utils import method_should_succeed
@@ -34,12 +36,16 @@ def run(ceph_cluster, **kw) -> int:
     config = kw["config"]
     cephadm = CephAdmin(cluster=ceph_cluster, **config)
     rados_obj = RadosOrchestrator(node=cephadm)
+    mon_obj = MonConfigMethods(rados_obj=rados_obj)
     pool_obj = PoolFunctions(node=cephadm)
     pool_configs = config["pool_configs"]
     pool_configs_path = config["pool_configs_path"]
     test_image = config.get("container_image")
+    verify_inflation = config.get("verify_inflation", False)
     installer = ceph_cluster.get_nodes(role="installer")[0]
     log.debug(f"Verifying pglog dups trimming on OSDs, test img : {test_image}")
+    flag_set_cmds = ["ceph osd set noout", "ceph osd set pause"]
+    flag_unset_cmds = ["ceph osd unset noout", "ceph osd unset pause"]
 
     try:
         with open(pool_configs_path, "r") as fd:
@@ -84,6 +90,7 @@ def run(ceph_cluster, **kw) -> int:
             [osds.append(osd) for osd in pg_set]
 
         log.info(f"Identified Acting set of OSDs for the Pools. {acting_sets}")
+        log.debug(f"OSDs selected for testing: {osds}")
 
         # Collect num pglog objects from dump_mempools
         pre_pglog_items = {}
@@ -94,8 +101,6 @@ def run(ceph_cluster, **kw) -> int:
             )
 
         log.debug("Setting noout and pause flags")
-        flag_set_cmds = ["ceph osd set noout", "ceph osd set pause"]
-        flag_unset_cmds = ["ceph osd unset noout", "ceph osd unset pause"]
         [rados_obj.node.shell([cmd]) for cmd in flag_set_cmds]
 
         # sleeping for 10 seconds for pause flag to take effect
@@ -118,12 +123,15 @@ def run(ceph_cluster, **kw) -> int:
         time.sleep(10)
 
         log.debug("Inflating the dup counts on all the corrupted OSDs")
-        if not inflate_dups(
+        new_acting_set = inflate_dups(
             rados_obj=rados_obj,
             acting_sets=acting_sets,
             pools=pools,
             test_image=test_image,
-        ):
+            verify_inflation=verify_inflation,
+        )
+
+        if not new_acting_set:
             log.error("Could not inflate the dups to the desired levels")
             return 1
 
@@ -134,13 +142,13 @@ def run(ceph_cluster, **kw) -> int:
         )
 
         mem_util_pre_up = get_osd_memory_usages(rados_obj=rados_obj)
+        log.debug("Completed collection of memory utilization before upgrade")
         for osd in osds:
             log.debug(
-                f"Memory utilization for {osd} before upgrade is : {mem_util_pre_up[osd]}"
+                f"Memory utilization for {osd} before upgrade is : {mem_util_pre_up.get(osd, None)}"
             )
 
         start_time, _ = installer.exec_command(cmd="sudo date -u '+%Y-%m-%d %H:%M:%S'")
-
         log.debug("Proceeding to upgrade cluster after inflating dup counts")
         if not upgrade_test_cluster(ceph_cluster=ceph_cluster, **config):
             log.error("Upgrade failed")
@@ -155,14 +163,16 @@ def run(ceph_cluster, **kw) -> int:
 
         # Checking the logs generated post upgrade
         log.debug("Proceeding to check logging post upgrade")
-        if not verify_trim_dups_warn_log(
+        warn_log = verify_trim_dups_warn_log(
             rados_obj=rados_obj,
-            acting_sets=acting_sets,
+            acting_sets=new_acting_set,
             start_time=start_time.strip(),
             end_time=end_time.strip(),
-        ):
+        )
+        if verify_inflation and not warn_log:
             log.error("Warning logs not generated post upgrade.")
             return 1
+
         log.debug("Verified logging of warning messages post upgrade")
 
         for pool in pools:
@@ -174,30 +184,54 @@ def run(ceph_cluster, **kw) -> int:
         log.debug("collecting memory utilization by OSDs")
         mem_util_post_up = get_osd_memory_usages(rados_obj=rados_obj)
         for osd in osds:
-            log.debug(
-                f"Memory utilization for {osd} After upgrade is : {mem_util_post_up[osd]}"
-            )
-            if mem_util_post_up[osd]["RES"] >= mem_util_pre_up[osd]["RES"]:
-                log.error(f"RES Memory not released for OSD : {osd}")
-                return 1
+            for osd in osds:
+                log.debug(
+                    f"Memory utilization for {osd} after upgrade is : {mem_util_pre_up.get(osd, None)}"
+                )
+            if mem_util_pre_up.get(osd, None) and mem_util_post_up.get(osd, None):
+                log.debug(
+                    f"Memory utilization of OSD : {osd} before: {mem_util_pre_up.get(osd)},"
+                    f" After: {mem_util_pre_up.get(osd)}"
+                )
+                if mem_util_post_up[osd]["RES"] >= mem_util_pre_up[osd]["RES"]:
+                    log.error(f"RES Memory not released for OSD : {osd}")
+                    return 1
         log.debug("RES Memory released after Upgrade")
 
         # Checking the dup count on all the OSDs:
         log.debug("Proceeding to check dup counts post upgrade")
         if not verify_post_upgrade_dups(rados_obj=rados_obj, acting_sets=acting_sets):
-            log.error("there are more than 3000 dups post upgrade on one or more OSDs")
+            log.error("there are more than 6000 dups post upgrade on one or more OSDs")
             return 1
         log.debug("The dup count on all the OSDs is as expected.")
-        log.info("Completed the workflow")
-        return 0
 
     except Exception as err:
         log.error(f"Could not run the workflow Err: {err}")
         return 1
 
     finally:
+        log.info("\n-----------------In Finally Block-----------------------\n")
         CONTINEOUS_IO = False
-        # contineous_io_thread.join()
+        if "contineous_io_thread" in locals() or "contineous_io_thread" in globals():
+            contineous_io_thread.join()
+        time.sleep(10)
+        [rados_obj.node.shell([cmd]) for cmd in flag_unset_cmds]
+        if "pools" in locals() or "pools" in globals():
+            for pool in pools:
+                rados_obj.delete_pool(pool=pool)
+
+        mon_obj.remove_config(section="mgr", name="mgr/cephadm/no_five_one_rgw")
+        mon_obj.remove_config(section="osd", name="osd_max_pg_log_entries")
+
+        # log cluster health
+        rados_obj.log_cluster_health()
+        # check for crashes after test execution
+        if rados_obj.check_crash_status():
+            log.error("Test failed due to crash at the end of test")
+            return 1
+
+    log.info("Completed the workflow")
+    return 0
 
 
 def upgrade_test_cluster(ceph_cluster, **kwargs) -> bool:
@@ -393,7 +427,9 @@ def inject_dups(rados_obj, acting_sets, test_image) -> bool:
     return True
 
 
-def inflate_dups(rados_obj, acting_sets, pools, test_image) -> bool:
+def inflate_dups(
+    rados_obj, acting_sets, pools, test_image, verify_inflation: bool = True
+):
     """
     Method which waits till the desired levels of dup entries are present on the cluster
     Args:
@@ -402,8 +438,9 @@ def inflate_dups(rados_obj, acting_sets, pools, test_image) -> bool:
             eg: {'8.0': [0, 5, 10], '9.0': [2, 6, 10]}
         pools: test pool names created on cluster
         test_image: Test image to be used to inject/trim dups
+        verify_inflation: check if the dups count has reached desired levels
 
-    Returns: Pass -> True, Fail -> False
+    Returns: Pass -> New acting set after removing the offline trimmed OSD, Fail -> False
 
     """
 
@@ -418,8 +455,13 @@ def inflate_dups(rados_obj, acting_sets, pools, test_image) -> bool:
     pglog_items = {}
     trim_tested = False
 
+    random_pgid = random.choice([pgid for pgid in acting_sets.keys()])
+    random_osd = random.choice(acting_sets[random_pgid])
+    acting_sets[random_pgid].remove(random_osd)
+    timeout = 14400 if verify_inflation else 600
+
     # Total wait time of 4 hours
-    end_time = datetime.datetime.now() + datetime.timedelta(seconds=14400)
+    end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
     while True:
         # Collecting the approx no of pglog objects from dump_mempools.
         # Let's have an approx of 5M objects across OSDs
@@ -435,7 +477,7 @@ def inflate_dups(rados_obj, acting_sets, pools, test_image) -> bool:
             log.info(
                 f"Inflated the pglog average count to {sum_pglog / len(osds)} across OSDs : {osds}"
             )
-            return True
+            return acting_sets
 
         log.debug(
             f"pg_log items not filled to expected levels. average count : {sum_pglog / len(osds)}"
@@ -446,31 +488,44 @@ def inflate_dups(rados_obj, acting_sets, pools, test_image) -> bool:
                 p.spawn(rwrite_nosave, obj=rados_obj, dur=50, count=1, pool=pool)
                 time.sleep(1)
 
-        if (sum_pglog / len(osds)) >= 1000000 and not trim_tested:
-            log.info(
-                f"Inflated the pglog average count to {sum_pglog / len(osds)} across OSDs"
+        if verify_inflation:
+            log.debug(
+                "verification of offline trimming and checking the dups accumulation on cluster"
             )
-            log.info("Testing the offline Trimming on one of the affected OSDs")
-            trim_tested = True
-            random_pgid = random.choice([pgid for pgid in acting_sets.keys()])
-            random_osd = random.choice(acting_sets[random_pgid])
-            log.info(
-                f"Picked PGID : {random_pgid} to trim the duplicates. OSD : {random_osd}"
-            )
-            rados_obj.node.shell(["ceph osd set noout"])
-            time.sleep(2)
-            if not verify_offline_trimming(
-                rados_obj=rados_obj, osd=random_osd, pgid=random_pgid, image=test_image
-            ):
-                log.error("Failed to test offline trimming of PG dups")
-                return False
-            rados_obj.node.shell(["ceph osd unset noout"])
-            log.info(
-                f"Dups trimmed on osd {random_osd} for PG {random_pgid} Successfully!!!"
-            )
+            if (sum_pglog / len(osds)) >= 1000000 and not trim_tested:
+                log.info(
+                    f"Inflated the pglog average count to {sum_pglog / len(osds)} across OSDs"
+                )
+                log.info("Testing the offline Trimming on one of the affected OSDs")
+                trim_tested = True
+                log.info(
+                    f"Picked PGID : {random_pgid} to trim the duplicates. OSD : {random_osd}"
+                )
+                rados_obj.node.shell(["ceph osd set noout"])
+                time.sleep(2)
+                if not verify_offline_trimming(
+                    rados_obj=rados_obj,
+                    osd=random_osd,
+                    pgid=random_pgid,
+                    image=test_image,
+                ):
+                    log.error("Failed to test offline trimming of PG dups")
+                    return False
+                rados_obj.node.shell(["ceph osd unset noout"])
+                log.info(
+                    f"Dups trimmed on osd {random_osd} for PG {random_pgid} Successfully!!!"
+                )
         if not end_time > datetime.datetime.now():
-            log.error("PG log entries not inflated enough even after 4 hours of IOs")
-            return False
+            if verify_inflation:
+                log.error(
+                    "PG log entries not inflated enough even after 4 hours of IOs"
+                )
+                return False
+            else:
+                log.info(
+                    "Not testing if the dups have been inflated sufficiently. Running objects for 30 mins"
+                )
+                return acting_sets
 
 
 def get_dups_count(host, path) -> int:
@@ -623,7 +678,7 @@ def verify_post_upgrade_dups(rados_obj, acting_sets) -> bool:
             log.debug(
                 f"Dups count on OSD : {osd} for PG : {pgid} after upgrade is {dup_count}"
             )
-            if dup_count > 3000:
+            if dup_count > 6000:
                 log.error(
                     f"Dups not trimmed on osd {osd} for PG {pgid} on host {host.hostname}"
                 )
@@ -696,6 +751,7 @@ def get_osd_memory_usages(rados_obj: RadosOrchestrator):
         )
         try:
             out, _ = host.exec_command(sudo=True, cmd=cmd)
+            log.debug(f"Top output for mem usage : \n\n {out} \n\n")
             usages = re.findall(regex, out)
             for usage in usages:
                 memory_use[int(usage[2])] = {

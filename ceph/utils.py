@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 import re
 import time
@@ -14,6 +15,7 @@ from libcloud.common.exceptions import BaseHTTPError
 from libcloud.compute.providers import get_driver
 from libcloud.compute.types import Provider
 
+from cli.utilities.configure import add_centos_epel_repo
 from compute.baremetal import CephBaremetalNode
 from compute.ibm_vpc import CephVMNodeIBM, get_ibm_service
 from compute.openstack import CephVMNodeV2, NetworkOpFailure, NodeError, VolumeOpFailure
@@ -26,7 +28,7 @@ from .parallel import parallel
 
 log = Log(__name__)
 RETRY_EXCEPTIONS = (NodeError, VolumeOpFailure, NetworkOpFailure)
-DEFAULT_OSBS_SERVER = "http://file.rdu.redhat.com/~kdreyer/osbs/"
+DEFAULT_OSBS_SERVER = "http://file.corp.redhat.com/~kdreyer/osbs/"
 
 
 def cleanup_ibmc_ceph_nodes(ibm_cred, pattern):
@@ -37,6 +39,7 @@ def cleanup_ibmc_ceph_nodes(ibm_cred, pattern):
          ibm_cred     global configuration file(ibm)
          pattern      pattern to match instance name
     """
+    log.info("Destroying existing IBM instances..")
     glbs = ibm_cred.get("globals")
     ibmc = glbs.get("ibm-credentials")
 
@@ -94,7 +97,7 @@ def create_baremetal_ceph_nodes(cluster_conf):
 
     with parallel() as p:
         for n, node in enumerate(nodes):
-            node_id = node.get("id") or f"node{n}"
+            node_id = node.get("id") or f"node{n + 1}"
             params = dict(
                 {
                     "ip": node.get("ip"),
@@ -138,7 +141,7 @@ def create_ibmc_ceph_nodes(
          run_id           unique id for the run
          instances_name   Name of the instance
     """
-    log.info("testing ibm stage")
+    log.info("Creating IBM instances")
     ibm_glbs = ibm_creds.get("globals")
     ibm_cred = ibm_glbs.get("ibm-credentials")
     params = dict()
@@ -209,7 +212,7 @@ def create_ibmc_ceph_nodes(
                     node_params["osd-scenario"] = node_dict.get("osd-scenario")
 
                 if node_dict.get("image-name"):
-                    node_params["image-name"] = node_dict.get("image-name")
+                    node_params["image-name"] = node_dict["image-name"]["ibmc"]
 
                 if node_dict.get("cloud-data"):
                     node_params["cloud-data"] = node_dict.get("cloud-data")
@@ -280,6 +283,7 @@ def setup_vm_node_ibm(node, ceph_nodes, **params):
 def create_ceph_nodes(
     cluster_conf, inventory, osp_cred, run_id, instances_name=None, enable_eus=False
 ):
+    log.info("Creating osp instances")
     osp_glbs = osp_cred.get("globals")
     os_cred = osp_glbs.get("openstack-credentials")
     params = dict()
@@ -350,7 +354,7 @@ def create_ceph_nodes(
                     node_params["osd-scenario"] = node_dict.get("osd-scenario")
 
                 if node_dict.get("image-name"):
-                    node_params["image-name"] = node_dict.get("image-name")
+                    node_params["image-name"] = node_dict["image-name"]["openstack"]
 
                 if node_dict.get("cloud-data"):
                     node_params["cloud-data"] = node_dict.get("cloud-data")
@@ -443,6 +447,7 @@ def get_openstack_driver(yaml):
 
 
 def cleanup_ceph_nodes(osp_cred, pattern=None, timeout=300):
+    log.info("Destroying existing osp instances..")
     user = os.getlogin()
     name = pattern if pattern else "-{user}-".format(user=user)
     driver = get_openstack_driver(osp_cred)
@@ -514,14 +519,36 @@ def keep_alive(ceph_nodes):
         node.exec_command(cmd="uptime", check_ec=False)
 
 
-def setup_repos(ceph, base_url, installer_url=None):
-    repos = ["MON", "OSD", "Tools", "Calamari", "Installer"]
-    base_repo = generate_repo_file(base_url, repos)
-    base_file = ceph.remote_file(
-        sudo=True, file_name="/etc/yum.repos.d/rh_ceph.repo", file_mode="w"
-    )
-    base_file.write(base_repo)
-    base_file.flush()
+def setup_repos(
+    ceph,
+    base_url,
+    platform=None,
+    installer_url=None,
+    repos=None,
+    cloud_type="openstack",
+    ibm_build=False,
+):
+    if base_url.endswith(".repo") or ibm_build:
+        cmd = f"yum-config-manager --add-repo {base_url}"
+        ceph.exec_command(sudo=True, cmd=cmd)
+
+    elif base_url.endswith("/repo"):
+        cmd = f"curl -L -o /etc/yum.repos.d/upstream.repo {base_url}"
+        ceph.exec_command(sudo=True, cmd=cmd)
+
+        if "centos" in base_url:
+            add_centos_epel_repo(ceph, platform)
+
+    else:
+        if not repos:
+            repos = ["MON", "OSD", "Tools"]
+        base_repo = generate_repo_file(base_url, repos, cloud_type)
+        base_file = ceph.remote_file(
+            sudo=True, file_name="/etc/yum.repos.d/rh_ceph.repo", file_mode="w"
+        )
+        base_file.write(base_repo)
+        base_file.flush()
+
     if installer_url is not None:
         installer_repos = ["Agent", "Main", "Installer"]
         inst_repo = generate_repo_file(installer_url, installer_repos)
@@ -576,7 +603,7 @@ def check_ceph_healthly(
                     )
                 )
         else:
-            out, _ = ceph_mon.exec_command(cmd="sudo ceph -s")
+            out, _ = ceph_mon.exec_command(sudo=True, cmd="ceph -s -f json")
 
         if not any(state in out for state in pending_states):
             if all(state in out for state in valid_states):
@@ -590,9 +617,10 @@ def check_ceph_healthly(
         match = re.search(r"(\d+)\s+osds:\s+(\d+)\s+up\s\(\w+\s\w+\),\s(\d+)\sin", out)
     else:
         match = re.search(r"(\d+)\s+osds:\s+(\d+)\s+up,\s+(\d+)\s+in", out)
-    all_osds = int(match.group(1))
-    up_osds = int(match.group(2))
-    in_osds = int(match.group(3))
+    cluster_status = json.loads(out)
+    all_osds = cluster_status["osdmap"]["num_osds"]
+    up_osds = cluster_status["osdmap"]["num_up_osds"]
+    in_osds = cluster_status["osdmap"]["num_in_osds"]
     if num_osds != all_osds:
         log.error("Not all osd's are up. %s / %s" % (num_osds, all_osds))
         return 1
@@ -604,7 +632,7 @@ def check_ceph_healthly(
     match = re.search(r"(\d+) daemons, quorum", out)
     if not match:
         match = re.search(r"(\d+) mons at", out)
-    all_mons = int(match.group(1))
+    all_mons = cluster_status["monmap"]["num_mons"]
     if all_mons != num_mons:
         log.error("Not all monitors are in cluster")
         return 1
@@ -614,8 +642,8 @@ def check_ceph_healthly(
     return 0
 
 
-def generate_repo_file(base_url, repos):
-    return Ceph.generate_repository_file(base_url, repos)
+def generate_repo_file(base_url, repos, cloud_type="openstack"):
+    return Ceph.generate_repository_file(base_url, repos, cloud_type)
 
 
 def get_iso_file_url(base_url):
@@ -681,8 +709,8 @@ def setup_deb_repos(node, ubuntu_repo):
         "https://www.redhat.com/security/897da07a.txt",
         "https://www.redhat.com/security/f21541eb.txt",
         # 'https://prodsec.redhat.com/keys/00da75f2.txt',
-        # TODO: replace file file.rdu.redhat.com/~kdreyer with prodsec.redhat.com when it's back
-        "http://file.rdu.redhat.com/~kdreyer/keys/00da75f2.txt",
+        # TODO: replace file file.corp.redhat.com/~kdreyer with prodsec.redhat.com when it's back
+        "http://file.corp.redhat.com/~kdreyer/keys/00da75f2.txt",
         "https://www.redhat.com/security/data/fd431d51.txt",
     ]
 
@@ -1017,6 +1045,9 @@ def get_node_by_id(cluster, node_name):
         for ele in searches:
             if ele == node_name:
                 return node
+        else:
+            if node_name == node.id:
+                return node
 
 
 def get_nodes_by_ids(cluster, node_names):
@@ -1180,4 +1211,78 @@ def is_legacy_container_present(ceph_cluster):
             )
             return True
 
+    return False
+
+
+def systemctl(node, op, unit):
+    """Execute systemctl command operation(op) on specific service unit.
+
+    Args:
+        node: node to execute command
+        op: systemctl supported action (ex., start|stop|enable|disable..,)
+        unit: unit service-name
+
+    Returns:
+        out, err
+
+    """
+    cmd_ = f"systemctl {op} {unit}.service"
+    out, err = node.exec_command(cmd=cmd_, sudo=True)
+    log.info(out)
+    return out, err
+
+
+def host_shutdown(gyaml, name) -> bool:
+    """
+    Method to shut down the openstack instance
+    Args:
+        gyaml: openstack credentials to be used
+        name: Name of the host to be operated upon
+    Return:
+        Pass -> True ( host shutdown successfully )
+        Fail -> False ( Host not shutdown )
+    """
+    driver = get_openstack_driver(gyaml)
+    pattern = re.compile(name, re.IGNORECASE)
+    for node in driver.list_nodes():
+        if pattern.search(node.name):
+            log.debug("Doing power-off on %s" % node.name)
+            driver.ex_stop_node(node)
+            time.sleep(20)
+            op = driver.ex_get_node_details(node)
+            if op.state == "stopped":
+                log.info(f"Node: {name} stopped successfully")
+                return True
+            else:
+                log.error(f"Failed to stop host {name}")
+                return False
+    log.error(f"node {name} not found in the list obtained from driver")
+    return False
+
+
+def host_restart(gyaml, name) -> bool:
+    """
+    Method to restart the openstack instance
+    Args:
+        gyaml: openstack credentials to be used
+        name: Name of the host to be operated upon
+    Return:
+        Pass -> True ( host re-start successfully )
+        Fail -> False ( Host could not be restarted )
+    """
+    driver = get_openstack_driver(gyaml)
+    pattern = re.compile(name, re.IGNORECASE)
+    for node in driver.list_nodes():
+        if pattern.search(node.name):
+            log.debug("Doing power-on on %s" % node.name)
+            driver.ex_start_node(node)
+            time.sleep(20)
+            op = driver.ex_get_node_details(node)
+            if op.state == "running":
+                log.info(f"Node {name} restarted successfully")
+                return True
+            else:
+                log.error(f"Failed to start node : {name}")
+                return False
+    log.error(f"node {name} not found in the list obtained from driver")
     return False

@@ -8,17 +8,14 @@ monkey.patch_all()
 import datetime
 import importlib
 import json
-import logging
 import os
 import pickle
 import re
 import sys
-import textwrap
 import time
 import traceback
 from copy import deepcopy
 from getpass import getuser
-from typing import Optional
 
 import requests
 import yaml
@@ -35,21 +32,27 @@ from ceph.utils import (
     create_ceph_nodes,
     create_ibmc_ceph_nodes,
 )
+from cephci.cluster_info import get_ceph_var_logs
+from cli.performance.memory_and_cpu_utils import (
+    start_logging_processes,
+    stop_logging_process,
+    upload_mem_and_cpu_logger_script,
+)
 from utility import sosreport
-from utility.config import TestMetaData
 from utility.log import Log
 from utility.polarion import post_to_polarion
 from utility.retry import retry
-from utility.utils import (
-    ReportPortal,
-    close_and_remove_filehandlers,
-    configure_logger,
+from utility.utils import (  # ReportPortal,
+    check_build_overrides,
     create_run_dir,
     create_unique_test_name,
     email_results,
     fetch_build_artifacts,
     generate_unique_id,
     magna_url,
+    setup_cluster_access,
+    validate_conf,
+    validate_image,
 )
 from utility.xunit import create_xunit_results
 
@@ -77,7 +80,6 @@ A simple test suite wrapper that executes tests based on yaml test configuration
         [--docker-tag <tag>]
         [--insecure-registry]
         [--post-results]
-        [--report-portal]
         [--upstream-build <upstream-build>]
         [--log-level <LEVEL>]
         [--log-dir  <directory-name>]
@@ -86,7 +88,6 @@ A simple test suite wrapper that executes tests based on yaml test configuration
         [--filestore]
         [--use-ec-pool <k,m>]
         [--hotfix-repo <repo>]
-        [--ignore-latest-container]
         [--skip-version-compare]
         [--custom-config <key>=<value>]...
         [--custom-config-file <file>]
@@ -94,6 +95,9 @@ A simple test suite wrapper that executes tests based on yaml test configuration
         [--enable-eus]
         [--skip-enabling-rhel-rpms]
         [--skip-sos-report]
+        [--skip-tc <items>]
+        [--monitor-performance]
+        [--disable-console-log]
   run.py --cleanup=name --osp-cred <file> [--cloud <str>]
         [--log-level <LEVEL>]
 
@@ -134,8 +138,6 @@ Options:
   --post-results                    Post results to polarion, needs Polarion IDs
                                     in test suite yamls. Requires config file, see
                                     README.
-  --report-portal                   Post results to report portal. Requires config file,
-                                    see README.
   --log-level <LEVEL>               Set logging level
   --log-dir <LEVEL>                 Set log directory
   --instances-name <name>           Name that will be used for instances creation
@@ -144,7 +146,6 @@ Options:
   --filestore                       To specify filestore as osd object store
   --use-ec-pool <k,m>               To use ec pools instead of replicated pools
   --hotfix-repo <repo>              To run sanity on hotfix build
-  --ignore-latest-container         Skip getting latest nightly container
   --skip-version-compare            Skip verification that ceph versions change post
                                     upgrade
   -c --custom-config <name>=<value> Add a custom config key/value to ceph_conf_overrides
@@ -157,9 +158,15 @@ Options:
                                     rhel images for Interop runs
   --skip-sos-report                 Enables to collect sos-report on test suite failures
                                     [default: false]
+  --skip-tc <items>                 skip test case provided in comma seperated fashion
+  --monitor-performance             Monitor performance and CPU usage on all/required nodes
+                                    for every test and collects data to specified dir
+  --disable-console-log             To stopping logging to console
+                                    [default: false]
 """
 log = Log()
 test_names = []
+run_summary = {}
 
 
 @retry(LibcloudError, tries=5, delay=15)
@@ -169,27 +176,19 @@ def create_nodes(
     osp_cred,
     run_id,
     cloud_type="openstack",
-    report_portal_session=None,
     instances_name=None,
     enable_eus=False,
-    rp_logger: Optional[ReportPortal] = None,
 ):
     """Creates the system under test environment."""
-    if rp_logger:
-        name = create_unique_test_name("ceph node creation", test_names)
-        test_names.append(name)
-        desc = "Ceph cluster preparation"
-        rp_logger.start_test_item(name=name, description=desc, item_type="STEP")
 
-    log.info("Destroying existing osp instances..")
+    validate_conf(conf)
+    validate_image(conf, cloud_type)
     if cloud_type == "openstack":
         cleanup_ceph_nodes(osp_cred, instances_name)
     elif cloud_type == "ibmc":
         cleanup_ibmc_ceph_nodes(osp_cred, instances_name)
 
     ceph_cluster_dict = {}
-
-    log.info("Creating osp instances")
     clients = []
     for cluster in conf.get("globals"):
         if cloud_type == "openstack":
@@ -219,17 +218,20 @@ def create_nodes(
 
             if cloud_type == "openstack":
                 private_ip = node.get_private_ip()
+                ceph_nodename = node.node.name
             elif "baremetal" in cloud_type:
                 private_key_path = node.private_key if node.private_key else ""
                 private_ip = node.ip_address
                 look_for_key = True if node.private_key else False
                 root_password = node.root_password
+                ceph_nodename = node.hostname
             elif cloud_type == "ibmc":
                 glbs = osp_cred.get("globals")
                 ibmc = glbs.get("ibm-credentials")
                 private_key_path = ibmc.get("private_key_path")
                 private_ip = node.ip_address
                 look_for_key = True
+                ceph_nodename = node.hostname
 
             if node.role == "win-iscsi-clients":
                 clients.append(
@@ -250,6 +252,8 @@ def create_nodes(
                     private_ip=private_ip,
                     hostname=node.hostname,
                     ceph_vmnode=node,
+                    ceph_nodename=ceph_nodename,
+                    id=node.id,
                 )
                 ceph_nodes.append(ceph)
 
@@ -274,12 +278,7 @@ def create_nodes(
             try:
                 instance.connect()
             except BaseException:
-                if rp_logger:
-                    rp_logger.finish_test_item(status="FAILED")
                 raise
-
-    if rp_logger:
-        rp_logger.finish_test_item(status="PASSED")
 
     return ceph_cluster_dict, clients
 
@@ -364,7 +363,6 @@ def get_html_page(url: str) -> str:
 
 
 def run(args):
-
     import urllib3
 
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -388,29 +386,27 @@ def run(args):
     osp_cred = load_file(osp_cred_file) if osp_cred_file else dict()
     cleanup_name = args.get("--cleanup")
 
-    ignore_latest_nightly_container = args.get("--ignore-latest-container")
-
     # Set log directory and get absolute path
     console_log_level = args.get("--log-level")
     log_directory = args.get("--log-dir")
+    disable_console_log = args.get("--disable-console-log", False)
     post_to_report_portal = args.get("--report-portal")
 
+    # Get Perf and CPU mon param
+    enable_perf_mon = args.get("--monitor-performance", False)
+
+    # jenkin job url
+    jenkin_job_url = os.environ.get("BUILD_URL")
+
     run_id = generate_unique_id(length=6)
-    rp_logger = None
-    if post_to_report_portal:
-        rp_logger = ReportPortal()
 
-    TestMetaData(run_id=run_id, rhbuild=rhbuild, rhcs="rhcs", rp_logger=rp_logger)
     run_dir = create_run_dir(run_id, log_directory)
-    startup_log = os.path.join(run_dir, "startup.log")
 
-    handler = logging.FileHandler(startup_log)
-    log.logger.addHandler(handler)
+    log.configure_logger("startup", run_dir, disable_console_log)
 
     if console_log_level:
         log.logger.setLevel(console_log_level.upper())
 
-    log.info(f"Startup log location: {startup_log}")
     run_start_time = datetime.datetime.now()
     trigger_user = getuser()
 
@@ -448,25 +444,36 @@ def run(args):
 
     platform = args["--platform"]
     build = args.get("--build")
+    upstream_build = args.get("--upstream-build", None)
 
-    if build and build not in ["released"] and not ignore_latest_nightly_container:
-        base_url, docker_registry, docker_image, docker_tag = fetch_build_artifacts(
-            build, rhbuild, platform, args.get("--upstream-build", None)
-        )
+    base_url = args.get("--rhs-ceph-repo")
+    ubuntu_repo = args.get("--ubuntu-repo")
+    docker_registry = args.get("--docker-registry")
+    docker_image = args.get("--docker-image")
+    docker_tag = args.get("--docker-tag")
+    kernel_repo = args.get("--kernel-repo")
+
+    if not check_build_overrides(base_url, docker_registry, docker_image, docker_tag):
+        if build and build not in ["released"]:
+            base_url, docker_registry, docker_image, docker_tag = fetch_build_artifacts(
+                build, rhbuild, platform, upstream_build
+            )
+    else:
+        build = None
 
     store = args.get("--store") or False
-
-    base_url = args.get("--rhs-ceph-repo") or base_url
-    ubuntu_repo = args.get("--ubuntu-repo") or ubuntu_repo
-    docker_registry = args.get("--docker-registry") or docker_registry
-    docker_image = args.get("--docker-image") or docker_image
-    docker_tag = args.get("--docker-tag") or docker_tag
-    kernel_repo = args.get("--kernel-repo")
 
     docker_insecure_registry = args.get("--insecure-registry")
 
     post_results = args.get("--post-results")
     skip_setup = args.get("--skip-cluster")
+    skip_tc = args.get("--skip-tc")
+    if skip_tc:
+        skip_tc_list = (
+            [item for item in skip_tc.split(",")] if "," in skip_tc else [skip_tc]
+        )
+    else:
+        skip_tc_list = []
     skip_subscription = args.get("--skip-subscription")
 
     instances_name = args.get("--instances-name")
@@ -516,7 +523,6 @@ def run(args):
             distro.append(inventory.get("instance").get("create").get("image-name"))
 
     for cluster in conf.get("globals"):
-
         if cluster.get("ceph-cluster").get("inventory"):
             cluster_inventory_path = os.path.abspath(
                 cluster.get("ceph-cluster").get("inventory")
@@ -555,7 +561,7 @@ def run(args):
 
     distro = ", ".join(list(set(distro)))
     if not ceph_version and build == "upstream":
-        ceph_version.append(args.get("--upstream-build", None))
+        ceph_version.append(upstream_build)
     ceph_version = ", ".join(list(set(ceph_version)))
     ceph_ansible_version = ", ".join(list(set(ceph_ansible_version)))
 
@@ -565,59 +571,6 @@ def run(args):
 
     service = None
     suite_name = "::".join(suite_files)
-    if post_to_report_portal:
-        log.info("Creating report portal session")
-
-        # Only the first file is considered for launch description.
-        suite_file_name = suite_name.split("::")[0].split("/")[-1]
-        suite_file_name = suite_file_name.strip(".yaml")
-        suite_file_name = " ".join(suite_file_name.split("_"))
-        _log = run_dir.replace("/ceph/", "http://magna002.ceph.redhat.com/")
-
-        launch_name = f"RHCS {rhbuild} - {suite_file_name}"
-        launch_desc = textwrap.dedent(
-            """
-            ceph version: {ceph_version}
-            ceph-ansible version: {ceph_ansible_version}
-            compose-id: {compose_id}
-            invoked-by: {user}
-            log-location: {_log}
-            """.format(
-                ceph_version=ceph_version,
-                ceph_ansible_version=ceph_ansible_version,
-                user=getuser(),
-                compose_id=compose_id,
-                _log=_log,
-            )
-        )
-        if docker_image and docker_registry and docker_tag:
-            launch_desc = launch_desc + textwrap.dedent(
-                """
-                docker registry: {docker_registry}
-                docker image: {docker_image}
-                docker tag: {docker_tag}
-                invoked-by: {user}
-                """.format(
-                    docker_registry=docker_registry,
-                    docker_image=docker_image,
-                    user=getuser(),
-                    docker_tag=docker_tag,
-                )
-            )
-
-        qe_tier = get_tier_level(suite_name)
-        attributes = dict(
-            {
-                "rhcs": rhbuild,
-                "tier": qe_tier,
-                "ceph_version": ceph_version,
-                "os": platform if platform else "-".join(rhbuild.split("-")[1:]),
-            }
-        )
-
-        rp_logger.start_launch(
-            name=launch_name, description=launch_desc, attributes=attributes
-        )
 
     def fetch_test_details(var) -> dict:
         """
@@ -650,6 +603,10 @@ def run(args):
         details["duration"] = "0s"
         details["status"] = "Not Executed"
         details["comments"] = var.get("comments", str())
+        details["jenkin-url"] = jenkin_job_url
+        details["cloud-type"] = cloud_type
+        details["instance-name"] = instances_name
+        details["invoked-by"] = trigger_user
         return details
 
     if reuse is None:
@@ -660,10 +617,8 @@ def run(args):
                 osp_cred,
                 run_id,
                 cloud_type,
-                service,
                 instances_name,
                 enable_eus=enable_eus,
-                rp_logger=rp_logger,
             )
         except Exception as err:
             log.error(err)
@@ -693,6 +648,7 @@ def run(args):
                 "total_time": total_time,
                 "info": info,
                 "send_to_cephci": send_to_cephci,
+                "prefix": instances_name,
             }
             email_results(test_result=test_res)
             return 1
@@ -713,6 +669,7 @@ def run(args):
     sys.path.append(os.path.abspath("tests/rados"))
     sys.path.append(os.path.abspath("tests/cephadm"))
     sys.path.append(os.path.abspath("tests/rbd"))
+    sys.path.append(os.path.abspath("tests/rbd/rest"))
     sys.path.append(os.path.abspath("tests/rbd_mirror"))
     sys.path.append(os.path.abspath("tests/cephfs"))
     sys.path.append(os.path.abspath("tests/iscsi"))
@@ -724,6 +681,11 @@ def run(args):
     sys.path.append(os.path.abspath("tests/misc_env"))
     sys.path.append(os.path.abspath("tests/parallel"))
     sys.path.append(os.path.abspath("tests/upgrades"))
+    sys.path.append(os.path.abspath("tests/ceph_volume"))
+    sys.path.append(os.path.abspath("tests/nvmeof"))
+    sys.path.append(os.path.abspath("tests/nvmeof/rest"))
+    sys.path.append(os.path.abspath("tests/nfs"))
+    sys.path.append(os.path.abspath("tests/smb"))
 
     tests = suite.get("tests")
     tcs = []
@@ -736,18 +698,25 @@ def run(args):
 
     # Initialize test return code
     rc = 0
+    run_config = {
+        "log_dir": run_dir,
+        "run_id": run_id,
+    }
+    download_path = run_dir if not log_directory else log_directory
+    cluster_info = []
 
     for test in tests:
         test = test.get("test")
-        parallel = test.get("parallel")
         tc = fetch_test_details(test)
+        do_not_skip_test = test.get("do-not-skip-tc", False)
         test_file = tc["file"]
-        report_portal_description = tc["desc"] or ""
         unique_test_name = create_unique_test_name(tc["name"], test_names)
         test_names.append(unique_test_name)
 
-        tc["log-link"] = configure_logger(unique_test_name, run_dir)
-
+        tc["log-link"] = log.configure_logger(
+            unique_test_name, run_dir, disable_console_log
+        )
+        run_config.update({"test_name": unique_test_name, "log_link": tc["log-link"]})
         mod_file_name = os.path.splitext(test_file)[0]
         test_mod = importlib.import_module(mod_file_name)
         print("\nRunning test: {test_name}".format(test_name=tc["name"]))
@@ -759,10 +728,26 @@ def run(args):
         start = datetime.datetime.now()
 
         for cluster_name in test.get("clusters", ceph_cluster_dict):
+            # Add cluster names
+            if cluster_name not in cluster_info:
+                cluster_info.append(cluster_name)
+
+            # If Performance and CPU usage monitoring is enabled, perform pre-reqs
+            if enable_perf_mon:
+                if not upload_mem_and_cpu_logger_script(
+                    ceph_cluster_dict[cluster_name]
+                ):
+                    log.error(
+                        "Failed to upload Memory and CPU monitoring scripts to nodes. "
+                        "The tests will proceed without monitoring"
+                    )
+                    enable_perf_mon = False
+
             if test.get("clusters"):
                 config = test.get("clusters").get(cluster_name).get("config", {})
             else:
                 config = test.get("config", {})
+            parallel = test.get("parallel", [])
 
             if not config.get("base_url"):
                 config["base_url"] = base_url
@@ -797,12 +782,17 @@ def run(args):
                 docker_tag,
             )
 
+            if custom_config:
+                for _config in custom_config:
+                    if "ibm-build=" in _config:
+                        config["ibm_build"] = bool(_config.split("=")[1])
+
+                    if "enable-fips-mode=" in _config:
+                        config["enable_fips_mode"] = bool(_config.split("=")[1])
+
             config["ceph_docker_registry"] = docker_registry
-            report_portal_description += f"docker registry: {docker_registry}"
             config["ceph_docker_image"] = docker_image
-            report_portal_description += f"docker image: {docker_image}"
             config["ceph_docker_image_tag"] = docker_tag
-            report_portal_description += f"docker registry: {docker_registry}"
 
             if filestore:
                 config["filestore"] = filestore
@@ -825,47 +815,85 @@ def run(args):
             if os.environ.get("KERNEL-REPO-URL") is not None:
                 config["kernel-repo"] = os.environ.get("KERNEL-REPO-URL")
 
+            # Start performance and Cpu usage monitoring
+            if enable_perf_mon:
+                logging_process, tracker = start_logging_processes(
+                    ceph_cluster_dict[cluster_name], unique_test_name
+                )
             try:
-                if post_to_report_portal:
-                    rp_logger.start_test_item(
-                        name=unique_test_name,
-                        description=report_portal_description,
-                        item_type="STEP",
-                    )
-                    rp_logger.log(message=f"Logfile location - {tc['log-link']}")
-                    rp_logger.log(message=f"Polarion ID: {tc['polarion-id']}")
-
                 if "build" in config.keys():
                     _rhcs_version = config["build"]
+
                 # Initialize the cluster with the expected rhcs_version
                 ceph_cluster_dict[cluster_name].rhcs_version = _rhcs_version
+                if mod_file_name not in skip_tc_list or do_not_skip_test:
+                    rc = test_mod.run(
+                        ceph_cluster=ceph_cluster_dict[cluster_name],
+                        ceph_nodes=ceph_cluster_dict[cluster_name],
+                        config=config,
+                        parallel=parallel,
+                        test_data=ceph_test_data,
+                        ceph_cluster_dict=ceph_cluster_dict,
+                        clients=clients,
+                        run_config=run_config,
+                    )
 
-                rc = test_mod.run(
-                    ceph_cluster=ceph_cluster_dict[cluster_name],
-                    ceph_nodes=ceph_cluster_dict[cluster_name],
-                    config=config,
-                    parallel=parallel,
-                    test_data=ceph_test_data,
-                    ceph_cluster_dict=ceph_cluster_dict,
-                    clients=clients,
-                )
+                else:
+                    rc = -1
+
             except BaseException as be:  # noqa
+                # Log exception to stdout
                 log.exception(be)
+
+                # Set failure details
+                tc["err_type"] = "exception"
+                tc["err_msg"] = str(be)
+                tc["err_text"] = traceback.format_exc()
+
+                # Set return code to 1
                 rc = 1
+
             finally:
+                # Stop performance and Cpu usage monitoring
+                if enable_perf_mon:
+                    stop_logging_process(
+                        ceph_cluster_dict[cluster_name],
+                        logging_process,
+                        download_path,
+                        tracker,
+                    )
                 collect_recipe(ceph_cluster_dict[cluster_name])
                 if store:
                     store_cluster_state(ceph_cluster_dict, ceph_clusters_file)
 
+                # Artifacts from test appended to comments
+                if config.get("artifacts"):
+                    tc["comments"] += f"\n{config['artifacts']}"
+
+            # Check for Log object
+            _objects, _object = vars(test_mod), None
+            for k in _objects.keys():
+                if type(_objects.get(k)) is Log:
+                    _object = _objects.get(k)
+                    break
+
             if rc != 0:
+                # Check if err_type is set for exception
+                if _object and not (tc.get("err_type") == "exception"):
+                    tc["err_type"], tc["err_msg"] = "error", ""
+
+                    # Get error messages
+                    tc["err_msg"] = "\n".join(map(str, _object._log_errors))
+
                 break
 
+        # Calculate test execution time
         elapsed = datetime.datetime.now() - start
         tc["duration"] = elapsed
 
-        # Write to report portal
-        if post_to_report_portal:
-            rp_logger.finish_test_item(status="PASSED" if rc == 0 else "FAILED")
+        # Reset errors list
+        if _object:
+            _object._log_errors = []
 
         if rc == 0:
             tc["status"] = "Pass"
@@ -875,6 +903,16 @@ def run(args):
 
             if post_results:
                 post_to_polarion(tc=tc)
+
+        elif rc == -1:
+            tc["status"] = "Skipped"
+            msg = "Test {} Skipped".format(test_mod)
+            log.info(msg)
+            print(msg)
+
+            if post_results:
+                post_to_polarion(tc=tc)
+
         else:
             tc["status"] = "Failed"
             msg = "Test {} failed".format(test_mod)
@@ -907,6 +945,7 @@ def run(args):
                 instances_name,
                 enable_eus=enable_eus,
             )
+
         tcs.append(tc)
 
     url_base = (
@@ -916,33 +955,35 @@ def run(args):
     )
     log.info("\nAll test logs located here: {base}".format(base=url_base))
 
-    close_and_remove_filehandlers()
+    log.close_and_remove_filehandlers()
 
     test_run_metadata = {
+        "jenkin-url": jenkin_job_url,
         "build": rhbuild,
-        "polarion-project-id": "CEPH",
-        "suite-name": suite_name,
-        "distro": distro,
         "ceph-version": ceph_version,
         "ceph-ansible-version": ceph_ansible_version,
         "base_url": base_url,
+        "suite-name": suite_name,
+        "conf-file": glb_file,
+        "polarion-project-id": "CEPH",
+        "distro": distro,
         "container-registry": docker_registry,
         "container-image": docker_image,
         "container-tag": docker_tag,
         "compose-id": compose_id,
         "log-dir": run_dir,
         "run-id": run_id,
+        "cloud-type": cloud_type,
+        "instance-name": instances_name,
+        "invoked-by": trigger_user,
     }
-
-    if post_to_report_portal:
-        rp_logger.finish_launch()
 
     if xunit_results:
         create_xunit_results(suite_name, tcs, test_run_metadata)
 
     print("\nAll test logs located here: {base}".format(base=url_base))
     print_results(tcs)
-    send_to_cephci = post_results or post_to_report_portal
+    send_to_cephci = post_results  # or post_to_report_portal
     run_end_time = datetime.datetime.now()
     duration = divmod((run_end_time - run_start_time).total_seconds(), 60)
     total_time = {
@@ -951,6 +992,8 @@ def run(args):
         "total": f"{int(duration[0])} mins, {int(duration[1])} secs",
     }
     info = {"status": "Pass"}
+    with open(f"{run_dir}/run_summary.json", "w", encoding="utf-8") as f:
+        json.dump(run_summary, f, ensure_ascii=False, indent=4)
     test_res = {
         "result": tcs,
         "run_id": run_id,
@@ -959,6 +1002,8 @@ def run(args):
         "total_time": total_time,
         "info": info,
         "send_to_cephci": send_to_cephci,
+        "cluster_info": cluster_info,
+        "prefix": instances_name,
     }
 
     email_results(test_result=test_res)
@@ -968,8 +1013,13 @@ def run(args):
             "\n\nGenerating sosreports for all the nodes due to failures in testcase"
         )
         for cluster in ceph_cluster_dict.keys():
+            log.info(f"Installing Ceph-common on {cluster} nodes to gather Sos report")
+            for node in ceph_cluster_dict[cluster].get_nodes():
+                setup_cluster_access(ceph_cluster_dict[cluster], node)
             installer = ceph_cluster_dict[cluster].get_nodes(role="installer")[0]
             sosreport.run(installer.ip_address, "cephuser", "cephuser", run_dir)
+            # This can be Removed as sos report will have this details as well
+            get_ceph_var_logs(ceph_cluster_dict[cluster], run_dir)
         log.info(f"Generated sosreports location : {url_base}/sosreports\n")
 
     return jenkins_rc

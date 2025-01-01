@@ -3,10 +3,15 @@ Module to change pool attributes
 1. Autoscaler tunables
 2. Snapshots
 """
+
+import datetime
+import random
 import time
+import traceback
 
 from ceph.ceph_admin import CephAdmin
 from ceph.rados.core_workflows import RadosOrchestrator
+from ceph.rados.rados_scrub import RadosScrubber
 from utility.log import Log
 
 log = Log(__name__)
@@ -24,6 +29,8 @@ class PoolFunctions:
             node: CephAdmin object
         """
         self.rados_obj = RadosOrchestrator(node=node)
+        self.scrub_obj = RadosScrubber(node=node)
+        self.node = node
 
     def verify_target_ratio_set(self, pool_name, ratio):
         """
@@ -82,17 +89,39 @@ class PoolFunctions:
                 Valid args:
                 1. obj_start: start count for object creation
                 2. obj_end : end count for object creation
-                3. num_keys_obj: Number of KW paris to be added to each object
+                3. num_keys_obj: Number of KW pairs to be added to each object
+                4. retain_script: flag to control deletion of omap script
 
         Returns: True -> pass, False -> fail
         """
+
+        def check_omap_entries() -> bool:
+            pool_stat = self.rados_obj.get_ceph_pg_dump_pools(pool_id=pool_id)
+            omap_keys = pool_stat["stat_sum"]["num_omap_keys"]
+            log.info(f"Current value of OMAP keys: {omap_keys}")
+            if omap_keys < expected_omap_keys:
+                # OMAP entries are not readily available,
+                # restarting primary osd as metadata does not get updated automatically.
+                # TBD: bug raised for the issue: https://bugzilla.redhat.com/show_bug.cgi?id=2210278
+                # primary_osd = self.rados_obj.get_pg_acting_set(pool_name=pool_name)[0]
+                # self.rados_obj.change_osd_state(action="restart", target=primary_osd)
+                log.error(
+                    f"OMAP key yet to reach expected value of {expected_omap_keys} for pool {pool_name}."
+                    f" Current entries : {omap_keys}"
+                )
+                return False
+            else:
+                return True
+
         # Getting the client node to perform the operations
         client_node = self.rados_obj.ceph_cluster.get_nodes(role="client")[0]
-        obj_start = kwargs.get("obj_start", 0)
-        obj_end = kwargs.get("obj_end", 2000)
-        num_keys_obj = kwargs.get("num_keys_obj", 20000)
+        pool_id = self.rados_obj.get_pool_id(pool_name=pool_name)
+        obj_start = int(kwargs.get("obj_start", 0))
+        obj_end = int(kwargs.get("obj_end", 2000))
+        num_keys_obj = int(kwargs.get("num_keys_obj", 20000))
+        expected_omap_keys = (obj_end - obj_start) * num_keys_obj
         log.debug(
-            f"Writing {(obj_end - obj_start) * num_keys_obj} Key paris"
+            f"Writing {(obj_end - obj_start) * num_keys_obj} Key pairs"
             f" to increase the omap entries on pool {pool_name}"
         )
         script_loc = "https://raw.githubusercontent.com/red-hat-storage/cephci/master/utility/generate_omap_entries.py"
@@ -110,26 +139,187 @@ class PoolFunctions:
         client_node.exec_command(sudo=True, cmd=cmd, long_running=True)
 
         # removing the py file copied
-        client_node.exec_command(sudo=True, cmd="rm -rf generate_omap_entries.py")
+        if not kwargs.get("retain_script", False):
+            client_node.exec_command(sudo=True, cmd="rm -rf generate_omap_entries.py")
 
-        log.debug("Checking the amount of omap entries created on the pool")
-        pool_stats = self.rados_obj.run_ceph_command(cmd="ceph df detail")["pools"]
-        for detail in pool_stats:
-            if detail["name"] == pool_name:
-                pool_1_stats = detail["stats"]
-                total_omap_data = pool_1_stats["omap_bytes_used"]
-                omap_data = pool_1_stats["stored_omap"]
+        # Triggering deep scrub on the pool
+        self.rados_obj.run_deep_scrub(pool=pool_name)
+
+        end_time = datetime.datetime.now() + datetime.timedelta(seconds=1200)
+        while end_time > datetime.datetime.now():
+            # Triggering deep scrub on the pool
+            log.debug(
+                "Triggered deep-scrub on the pool, and checking for omap entries present"
+            )
+            time.sleep(40)
+            if check_omap_entries():
+                log.info("OMAP entries are available")
                 break
-        if omap_data < 0:
-            log.error("No omap entries written into pool")
-            return False
+            self.rados_obj.run_deep_scrub(pool=pool_name)
+
+        pool_stat = self.rados_obj.get_ceph_pg_dump_pools(pool_id=pool_id)
+        omap_keys = pool_stat["stat_sum"]["num_omap_keys"]
+        omap_bytes = pool_stat["stat_sum"]["num_omap_bytes"]
         log.info(
-            f"Wrote {omap_data} bytes of omap data on the pool."
-            f"Total stored omap data on pool : {total_omap_data}"
+            f"Wrote {omap_keys} keys with {omap_bytes} bytes of OMAP data on the pool."
         )
         return True
 
-    def do_rados_delete(self, pool_name: str, pg_id: str = None):
+    def prepare_static_data(self, node):
+        """
+        creates a 4MB obj, same obj will be put nobj times
+        because in do_rados_get we have to verify checksum
+        """
+        tmp_file = "/tmp/sdata.txt"
+        DSTR = "hello world"
+        sfd = None
+
+        try:
+            sfd = node.remote_file(file_name=tmp_file, file_mode="w+")
+            sfd.write(DSTR * 4)
+            sfd.flush()
+            cmd = f"truncate -s 4M {tmp_file}"
+            node.exec_command(cmd=cmd)
+        except Exception as e:
+            log.error(f"file creation failed with exception: {e}")
+            log.error(traceback.format_exc())
+
+        sfd.seek(0)
+        sfd.close()
+        return tmp_file
+
+    def do_rados_put(
+        self,
+        client,
+        pool: str,
+        obj_name: str = None,
+        nobj: int = 1,
+        offset: int = 0,
+        timeout: int = 600,
+    ):
+        """
+        write static data to one object or nobjs in an app pool
+        Args:
+            client:                 client node
+            pool (str):             pool name to which data needs to added
+            optional args -
+            obj_name (str):         Name of the existing object or
+                                    new object to be created in the pool
+            nobj (int):             Number of times data will be put to object 'obj_name'
+                                    with incremental offset if 'obj_name' is specified, else
+                                    data will be put once to nobj number of objects -
+                                    obj0, obj1, obj2 and so on...
+            offset (int):           write object with start offset, default - 0
+            timeout (int):          timeout for rados put execution [defaults to 600 secs]
+
+        E.g. -
+            obj.do_rados_put(client=client_node, pool="pool_name")
+            obj.do_rados_put(client=client_node, pool="pool_name", obj_name="test-obj")
+            obj.do_rados_put(client=client_node, pool="pool_name", nobj=5)
+            obj.do_rados_put(client=client_node, pool="pool_name", nobj=5, offset=512, timeout=300)
+            obj.do_rados_put(client=client_node, pool="pool_name", obj_name="obj-test",
+                             nobj=5, offset=512, timeout=300)
+
+        Returns:
+            0 -> pass, 1 -> fail
+        """
+        infile = self.prepare_static_data(client)
+        log.debug(f"Input file is {infile}")
+
+        for i in range(nobj):
+            log.info(f"running command on {client.hostname}")
+            put_cmd = (
+                f"rados put -p {pool} obj{i} {infile}"
+                if obj_name is None
+                else f"rados put -p {pool} {obj_name} {infile}"
+            )
+            if offset:
+                put_cmd = f"{put_cmd} --offset {offset}"
+            try:
+                out, _ = client.exec_command(sudo=True, cmd=put_cmd, timeout=timeout)
+                if obj_name is not None and offset:
+                    offset += offset
+            except Exception:
+                log.error(traceback.format_exc)
+                return 1
+        return 0
+
+    def do_rados_get(self, pool, read_count) -> bool:
+        """
+        Perform read operations on the cluster
+        Args:
+            pool: name of the pool where read operations need to be performed
+            read_count: no of objects to be read from the pool
+                Allowed Values: "all" or count of objects
+                            "all": read all the objects on the pool
+        Returns:
+            True -> pass, False -> fail
+        """
+        pool_ls = f"rados -p {pool} ls"
+        all_objs = self.rados_obj.run_ceph_command(cmd=pool_ls)
+        count = 0
+        if not all_objs:
+            log.error("Could not run the command to fetch the objects")
+            return False
+        if len(all_objs) > 0:
+            log.debug(f"There are {len(all_objs)} objects present on the cluster")
+            objlist = [obj["name"] for obj in all_objs]
+
+            if read_count == "all":
+                read_count = len(objlist)
+
+            for obj in objlist:
+                file_name = f"/tmp/{obj}"
+                get_cmd = f"rados -p {pool} get {obj} {file_name}"
+                try:
+                    self.rados_obj.client.exec_command(sudo=True, cmd=get_cmd)
+                    count += 1
+                    if count >= read_count:
+                        log.info(
+                            f"Completed reading {read_count} objects on the pool."
+                            f"Refraining from reading further objects"
+                        )
+                        break
+                except Exception as err:
+                    log.error(f"rados get failed for {obj}. Error : {err}")
+                    return False
+            log.info(f"Completed reading {read_count} objects on the cluster")
+            return True
+        else:
+            log.info("There are no objects on the pool to perform read operations")
+            return True
+
+    def do_rados_append(self, client, pool: str, obj_name: str = None, nobj: int = 1):
+        """
+        Append static data to nobjs already present in a pool
+        Args:
+            client: client node
+            pool: pool name to which the object belongs
+            obj_name (optional): Name of the existing object in the pool
+            nobj (optional): Number of times data will be appended
+            to object 'obj_name' if 'obj_name' is specified, else
+            data will be appended once to nobj number of objects -
+            obj0, obj1, obj2 and so on...
+        Returns: 0 -> pass, 1 -> fail
+        """
+        infile = self.prepare_static_data(client)
+        log.debug(f"Input file is {infile}")
+
+        for i in range(nobj):
+            log.info(f"running command on {client.hostname}")
+            append_cmd = (
+                f"rados append obj{i} {infile} -p {pool}"
+                if obj_name is None
+                else f"rados append {obj_name} {infile} -p {pool}"
+            )
+            try:
+                out, _ = client.exec_command(sudo=True, cmd=append_cmd)
+            except Exception:
+                log.error(traceback.format_exc)
+                return False
+        return True
+
+    def do_rados_delete(self, pool_name: str, pg_id: str = None, objects: list = []):
         """
         deletes all the objects from the given pool / PG ID
         Args:
@@ -143,6 +333,9 @@ class PoolFunctions:
             obj_cmd = f"rados --pgid {pg_id} ls"
 
         delete_obj_list = self.rados_obj.run_ceph_command(cmd=obj_cmd, timeout=1000)
+        if objects:
+            delete_obj_list = objects
+        log.info(f"Objects to be deleted : {delete_obj_list}")
         for obj in delete_obj_list:
             cmd = f"rados -p {pool_name} rm {obj['name']}"
             self.rados_obj.node.shell([cmd], long_running=True)
@@ -160,18 +353,19 @@ class PoolFunctions:
         log.info(f"Completed deleting all objects from pool {pool_name}")
         return True
 
-    def create_pool_snap(self, pool_name: str):
+    def create_pool_snap(self, pool_name: str, count: int = 1):
         """
         Creates snapshots of the given pool
         Args:
             pool_name: name of the pool
+            count: number of snaps to create (optional)
         Returns: Pass -> name of the snapshot created, Fail -> False
 
         """
         # Checking if snapshots can be created on the supplied pool
-        cmd = "ceph osd dump"
-        pool_status = self.rados_obj.run_ceph_command(cmd=cmd, timeout=800)
-        for detail in pool_status["pools"]:
+        cmd = "ceph osd pool ls detail"
+        pool_detail = self.rados_obj.run_ceph_command(cmd=cmd, timeout=800)
+        for detail in pool_detail:
             if detail["pool_name"] != pool_name:
                 continue
             if "selfmanaged_snaps" in detail["flags_names"]:
@@ -182,12 +376,10 @@ class PoolFunctions:
                 return False
 
         # Creating snaps on the pool provided
-        cmd = "uuidgen"
-        out, err = self.rados_obj.node.shell([cmd])
-        uuid = out[0:5]
-        snap_name = f"{pool_name}-snap-{uuid}"
-        cmd = f"ceph osd pool mksnap {pool_name} {snap_name}"
-        self.rados_obj.node.shell([cmd], long_running=True)
+        for _ in range(count):
+            snap_name = f"{pool_name}-snap-{random.randint(0, 10000)}"
+            cmd = f"ceph osd pool mksnap {pool_name} {snap_name}"
+            self.rados_obj.node.shell([cmd], long_running=True)
 
         # Checking if snap was created successfully
         if not self.check_snap_exists(snap_name=snap_name, pool_name=pool_name):
@@ -216,9 +408,9 @@ class PoolFunctions:
 
         Returns: list of the snaps created
         """
-        cmd = "ceph osd dump"
-        pool_status = self.rados_obj.run_ceph_command(cmd=cmd, timeout=800)
-        for detail in pool_status["pools"]:
+        cmd = "ceph osd pool ls detail"
+        pool_detail = self.rados_obj.run_ceph_command(cmd=cmd, timeout=800)
+        for detail in pool_detail:
             if detail["pool_name"] == pool_name:
                 snap_list = [snap["name"] for snap in detail["pool_snaps"]]
                 log.debug(f"snapshots on pool : {snap_list}")
@@ -234,7 +426,7 @@ class PoolFunctions:
 
         """
         if snap_name:
-            delete_list = list(snap_name)
+            delete_list = snap_name.split()
         else:
             delete_list = self.get_snap_names(pool_name=pool_name)
 
@@ -354,3 +546,425 @@ class PoolFunctions:
             if entry["name"] == pool_name:
                 return entry["id"]
         log.error(f"Pool: {pool_name} not found")
+
+    def wait_for_clean_pool_pgs(self, pool_name: str, timeout: int = 9000) -> bool:
+        """
+        Waiting for up to 2.5 hours for the PG's to enter active + Clean state
+        Args:
+            pool_name: Name of the pool on which clean PGs should be checked
+            timeout: timeout in seconds or "unlimited"
+
+        Returns:  True -> pass, False -> fail
+        """
+        end_time = 0
+        if timeout == "unlimited":
+            condition = lambda x: "unlimited" == x
+        elif isinstance(timeout, int):
+            end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+            condition = lambda x: end_time > datetime.datetime.now()
+
+        pool_id = self.get_pool_id(pool_name=pool_name)
+        while condition(end_time if isinstance(timeout, int) else timeout):
+            flag = False
+            cmd = "ceph pg dump pgs"
+            pg_dump = self.rados_obj.run_ceph_command(cmd=cmd)
+            for entry in pg_dump["pg_stats"]:
+                if str(entry["pgid"]).startswith(str(pool_id)):
+                    # Proceeding to check if the PG is in active + clean on the pool
+                    rec = (
+                        "remapped",
+                        "backfilling",
+                        "degraded",
+                        "incomplete",
+                        "peering",
+                        "recovering",
+                        "recovery_wait",
+                        "undersized",
+                        "backfilling_wait",
+                    )
+                    flag = (
+                        False
+                        if any(key in rec for key in entry["state"].split("+"))
+                        else True
+                    )
+                    log.info(
+                        f"PG ID : {entry['pgid']}    ---------      PG State : {entry['state']}"
+                    )
+                    if not flag:
+                        break
+            if flag:
+                log.info("The recovery and back-filling of the OSD is completed")
+                return True
+            log.info("Waiting for active + clean. checking status again in a minute")
+            time.sleep(60)
+
+        log.error("The cluster did not reach active + Clean state")
+
+    def check_large_omap_warning(
+        self,
+        pool,
+        obj_num: int,
+        check: bool = True,
+        obj_check: bool = True,
+        timeout: int = 600,
+    ) -> bool:
+        """
+        Perform deep-scrub on given pool and check if "Large omap object"
+        warning is found
+        Args:
+            pool: Name of the pool
+            obj_num: number of objects which are expected to have
+                    large omap entries
+            obj_check: boolean value to decide whether number of large omap
+                objects is to be matched in the health warning
+            check: boolean value to decide whether warning should exist or not
+            timeout: timeout in seconds for warning to show up
+        Returns:
+            True-> pass | False-> Fail
+        """
+        if not check:
+            timeout = 120
+        warn_found = False
+        threshold, _ = self.node.shell(
+            ["ceph config get osd osd_deep_scrub_large_omap_object_key_threshold"]
+        )
+        if int(threshold) != 200000:
+            log.error(
+                f"Large omap object threshold has changed from 200000 to {threshold}."
+                f"Aborting execution, please align test input params with new threshold"
+            )
+            return False
+
+        self.rados_obj.run_deep_scrub(pool=pool)
+        # Timeout to let health warning show up
+        timeout_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+        while datetime.datetime.now() < timeout_time:
+            health_detail, _ = self.node.shell(["ceph health detail"])
+            log.info(health_detail)
+            if (
+                f"{obj_num} large omap objects" in health_detail
+                and f"{obj_num} large objects found in pool '{pool}'" in health_detail
+                or (not obj_check and "LARGE_OMAP_OBJECTS" in health_detail)
+            ):
+                warn_found = True
+                break
+            time.sleep(30)
+
+        if (warn_found and check) or (not warn_found and not check):
+            log.info(
+                f"Large omap objects warning found: {warn_found} | Expected: {check}"
+            )
+            return True
+        log.error("Large omap warning did not appear as per expectation")
+        return False
+
+    def perform_omap_operation(self, pool: str, obj: str, ops: str, **kwargs):
+        """
+        Module to perform specific operations on OMAP entries in an Object
+        Args:
+            pool: pool name which has objects with omap
+            obj: object name having omap entries
+            ops: any of the following operations :
+
+                - listomapkeys <obj-name>          list the keys in the object map
+                - listomapvals <obj-name>          list the keys and vals in the object map
+                - getomapval <obj-name> <key> [file] show the value for the specified key in the object's object map
+                - setomapval <obj-name> <key> <val | --input-file file>
+                - rmomapkey <obj-name> <key>       Remove key from the object map of <obj-name>
+                - clearomap <obj-name> [obj-name2 obj-name3...] clear all the omap keys for the specified objects
+                - getomapheader <obj-name> [file]  Dump the hexadecimal value of the object map header of <obj-name>
+                - setomapheader <obj-name> <val>   Set the value of the object map header of <obj-name>
+            kwargs: any additional input needed for a particular operation
+
+                - key is required for getomapval (kwargs['key'])
+                - key and value are required for setomapval (kwargs['key']) | (kwargs['val'])
+                - list of objects may be provided to clearomap (kwargs['obj_list'])
+        Returns: output of the rados command
+        """
+        log.debug(
+            f"Inputs provided: \n"
+            f"Pool name: {pool} \n"
+            f"Object name: {obj} \n"
+            f"Operation selected: {ops}"
+        )
+        base_cmd = f"rados -p {pool} {ops} {obj}"
+        if ops in ["listomapkeys", "listomapvals", "getomapheader"]:
+            _cmd = base_cmd
+        elif ops in ["getomapval", "rmomapkey"]:
+            if not kwargs.get("key"):
+                log.error(f"Need key to perform {ops} operation")
+                return
+            _cmd = f"{base_cmd} {kwargs['key']}"
+        elif ops == "setomapval":
+            if not kwargs.get("key") or not kwargs.get("val"):
+                log.error("Need both key and value to perform setomapval operation")
+                return
+            _cmd = f"{base_cmd} {kwargs['key']} {kwargs['val']}"
+        elif ops == "clearomap":
+            _cmd = (
+                f"{base_cmd} {kwargs['obj_list']}"
+                if kwargs.get("obj_list")
+                else base_cmd
+            )
+        elif ops == "setomapheader":
+            if not kwargs.get("val"):
+                log.error(f"Need value to perform {ops} operation")
+                return
+            _cmd = f"{base_cmd} {kwargs['val']}"
+        else:
+            log.error("Invalid operation, try again")
+            return
+
+        log.info(f"Executing command: {_cmd}")
+        return self.rados_obj.client.exec_command(cmd=_cmd, sudo=True)
+
+    def fetch_pool_stats(self, pool: str) -> dict:
+        """
+        Fetch pool statistics using ceph osd pool stats <pool-name>
+        Args:
+            pool: name of the pool in string format
+        Returns:
+            dictionary output of ceph osd pool stats command
+            e.g. [{"pool_name":"replica1_zone2","pool_id":9,"recovery":{},"recovery_rate":{},
+            "client_io_rate":{"write_bytes_sec":1255027894,"read_op_per_sec":0,"write_op_per_sec":299}}]
+        """
+        _cmd = f"ceph osd pool stats {pool}"
+        pool_stat = self.rados_obj.run_ceph_command(cmd=_cmd, client_exec=True)
+        return pool_stat[0]
+
+    def modify_autoscale_threshold(self, threshold: float):
+        """
+        Method to modify the pool autosclae threshold on the cluster
+        refer : https://docs.ceph.com/en/latest/rados/operations/placement-groups/#viewing-pg-scaling-recommendations
+        https://ceph.io/en/news/blog/2022/autoscaler_tuning/
+        Args:
+            threshold: autoscale threshold value to be set
+        Returns: None
+        """
+        cmd = f"ceph osd pool set threshold {threshold}"
+        self.node.shell([cmd])
+
+    def run_autoscaler_bulk_test(self, pool: str, **kwargs) -> tuple:
+        """
+        Method to run the PG autoscaler bulk tests
+
+        Args:
+            pool: Name of the pool on which autoscaler tests need to run
+            kwargs: Supported kwargs are:
+                overwrite_recovery_threads: Specifies if the recovery threads on cluster should be modified or not
+                test_pg_split: Set bulk flag to increase PG count
+                test_pg_merge: Remove the bulk flag to reduce PG count
+                modify_threshold: change threshold set on the cluster if the automatic scaling is not possible
+                timeout: timeout for PGs to scale up or down
+
+            Note: test_pg_split & test_pg_merge are mutually exclusive and only 1 KW arg can be passed at a time.
+
+        Returns:
+            tuple (run_status , Inactive_pg_count)
+        """
+        log.info(
+            f"Testing PG autoscaler bulk tests for PG splits & Merges on pool : {pool}"
+        )
+
+        overwrite_recovery_threads = kwargs.get("overwrite_recovery_threads", True)
+        test_pg_split = kwargs.get("test_pg_split")
+        test_pg_merge = kwargs.get("test_pg_merge")
+        modify_threshold = kwargs.get("modify_threshold", False)
+        timeout = kwargs.get("timeout", 14000)
+
+        if overwrite_recovery_threads:
+            self.rados_obj.change_recovery_threads(config={}, action="set")
+
+        autoscale_status = self.rados_obj.get_pg_autoscale_status(pool_name=pool)
+        if autoscale_status["pg_autoscale_mode"] != "on":
+            log.debug(
+                f"PG autoscale mode of the pool is not on. Status of pool : {autoscale_status}"
+                f"Turning the autoscale mode to ON for pool : {pool}"
+            )
+
+            self.rados_obj.set_pool_property(
+                pool=pool, props="pg_autoscale_mode", value="on"
+            )
+
+        init_pg_count = self.rados_obj.get_pool_property(pool=pool, props="pg_num")[
+            "pg_num"
+        ]
+        log.debug(
+            f"init PG count on the pool {pool} before starting any activity is: {init_pg_count}"
+        )
+
+        # Checking if PG increase is desired
+        if test_pg_split:
+            # checking if bulk is already set on pool
+            if self.rados_obj.get_pool_property(pool=pool, props="bulk")["bulk"]:
+                log.error(
+                    f"Bulk flag already set on pool : {pool}, cannot set again to test PG split"
+                )
+                return False, 0
+
+            log.info(
+                f"Starting to split the PGs of the pool {pool} by setting bulk flag"
+            )
+            self.rados_obj.set_pool_property(pool=pool, props="bulk", value="true")
+            time.sleep(10)
+
+            # checking if bulk was set successfully
+            if not self.rados_obj.get_pool_property(pool=pool, props="bulk")["bulk"]:
+                log.error(f"Bulk flag could not be set on pool : {pool}")
+                return False, 0
+
+            pg_count_bulk_true = self.rados_obj.get_pg_autoscale_status(pool_name=pool)[
+                "pg_num_final"
+            ]
+            log.debug(
+                f"PG count on pool {pool} post addition of bulk flag : {pg_count_bulk_true}"
+            )
+            no_count_change = False
+            if pg_count_bulk_true <= init_pg_count:
+                log.debug(
+                    "PG count before and after bulk flag is same. Checking the threshold values for pool"
+                )
+                log.info(
+                    "Checking the ideal PG count on the pool and the threshold set. default is 3"
+                )
+                pool_data = self.rados_obj.get_pg_autoscale_status(pool_name=pool)
+                final_pg_num = pool_data["pg_num_final"]
+                log.debug(
+                    f"Pool : {pool} details as fetched from autoscale-status : {pool_data}"
+                )
+
+                if float(final_pg_num / init_pg_count) <= 3.0:
+                    log.info(
+                        "PG count not expected to increase as the final pg num is less than the threshold"
+                    )
+                    if modify_threshold:
+                        log.info(
+                            "Param passed to modify the threshold set. Changing it to 1.3 from 3."
+                        )
+                        self.modify_autoscale_threshold(threshold=1.3)
+                        time.sleep(60)
+                    else:
+                        no_count_change = True
+
+            if not no_count_change:
+                log.debug(
+                    f"PG count on pool {pool} post addition of bulk flag : {pg_count_bulk_true}"
+                    f"Starting to wait for PG count on the pool to go from {init_pg_count} to"
+                    f" {pg_count_bulk_true} while checking for PG inactivity"
+                )
+
+                inactive_pg = 0
+                endtime = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+                while datetime.datetime.now() < endtime:
+                    pool_pg_num = self.rados_obj.get_pool_property(
+                        pool=pool, props="pg_num"
+                    )["pg_num"]
+                    if pool_pg_num == pg_count_bulk_true:
+                        log.info(
+                            f"PG count on pool {pool} is achieved post adding the bulk flag"
+                        )
+                        break
+                    log.info(
+                        f"PG count on pool {pool} has not reached desired levels."
+                        f"Expected : {pg_count_bulk_true}, Current : {pool_pg_num}"
+                    )
+                    if not self.rados_obj.check_inactive_pgs_on_pool(pool_name=pool):
+                        log.error(f"Inactive PGs found on pool : {pool}")
+                        inactive_pg += 1
+
+                    log.info(
+                        "Sleeping for 60 secs and checking the PG states and PG count"
+                    )
+                    time.sleep(60)
+                else:
+                    log.error(
+                        f"pg_num on pool {pool} did not reach the desired levels of PG count "
+                        f"with bulk flag enabled"
+                        f"Expected : {pg_count_bulk_true}"
+                    )
+                    if modify_threshold:
+                        self.modify_autoscale_threshold(threshold=3.0)
+                        time.sleep(60)
+                    return False, inactive_pg
+                log.info(
+                    "PGs increased to desired levels after application of bulk flag"
+                )
+                if modify_threshold:
+                    log.info(
+                        "Param passed to modify the threshold set. Reverting it back to 3"
+                    )
+                    self.modify_autoscale_threshold(threshold=3.0)
+                    time.sleep(60)
+
+                log.info(
+                    f"inactive PGs Count {inactive_pg} on the cluster during bulk flag addition on pool {pool}"
+                )
+                return True, inactive_pg
+            else:
+                log.info(
+                    f"No PG splits will be done on pool : {pool}."
+                    f" The change in the PG count before and after the bulk flag is less than the threshold."
+                )
+                return True, 0
+
+        if test_pg_merge:
+            # checking if bulk is already set on pool
+            if not self.rados_obj.get_pool_property(pool=pool, props="bulk")["bulk"]:
+                log.error(
+                    f"Bulk flag already removed from pool : {pool}, cannot remove again  to test PG merge"
+                )
+                return False, 0
+
+            log.info(
+                f"Starting to merge the PGs of the pool {pool} by removing bulk flag"
+            )
+            self.rados_obj.set_pool_property(pool=pool, props="bulk", value="false")
+            time.sleep(20)
+
+            # checking if bulk was unset successfully
+            if self.rados_obj.get_pool_property(pool=pool, props="bulk")["bulk"]:
+                log.error(f"Bulk flag could not be un-set on pool : {pool}")
+                return False, 0
+
+            pg_count_bulk_false = self.rados_obj.get_pg_autoscale_status(
+                pool_name=pool
+            )["pg_num_final"]
+            log.debug(
+                f"Calculated PG count on pool {pool} post removal of bulk flag : {pg_count_bulk_false}"
+            )
+
+            inactive_pg = 0
+            endtime = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+            while datetime.datetime.now() < endtime:
+                pool_pg_num = self.rados_obj.get_pool_property(
+                    pool=pool, props="pg_num"
+                )["pg_num"]
+                if pool_pg_num == pg_count_bulk_false:
+                    log.info(
+                        f"PG count on pool {pool} is achieved post removal of bulk flag"
+                    )
+                    break
+                log.info(
+                    f"PG count on pool {pool} has not reached desired levels."
+                    f"Expected : {pg_count_bulk_false}, Current : {pool_pg_num}"
+                )
+                if not self.rados_obj.check_inactive_pgs_on_pool(pool_name=pool):
+                    log.error(f"Inactive PGs found on pool : {pool}")
+                    inactive_pg += 1
+
+                log.info("Sleeping for 60 secs and checking the PG states and PG count")
+                time.sleep(60)
+            else:
+                log.error(
+                    f"pg_num on pool {pool} did not reach the desired levels of PG count "
+                    f"with bulk flag enabled"
+                    f"Expected : {pg_count_bulk_false}"
+                )
+                return False, inactive_pg
+
+            log.info("PGs increased to desired levels after application of bulk flag")
+            log.info(
+                f"Found inactive PGs on the cluster multiple times during bulk flag addition on pool {pool}"
+                f"Count {inactive_pg}"
+            )
+            return True, inactive_pg

@@ -5,9 +5,12 @@ def versions
 def cephVersion
 def composeUrl
 def platform
+def failureReason = ""
+def cimsg = ""
+def emailLib
 
 // Pipeline script entry point
-node("rhel-8-medium || ceph-qe-ci") {
+node("rhel-9-medium || ceph-qe-ci") {
     try {
         stage('prepareNode') {
             if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
@@ -36,6 +39,7 @@ node("rhel-8-medium || ceph-qe-ci") {
                 poll: false
             )
             sharedLib = load("${env.WORKSPACE}/pipeline/vars/v3.groovy")
+            emailLib = load("${env.WORKSPACE}/pipeline/vars/email.groovy")
             sharedLib.prepareNode()
         }
 
@@ -45,7 +49,7 @@ node("rhel-8-medium || ceph-qe-ci") {
             def minorVersion = versions.minor_version
             platform = versions.platform
 
-            def cimsg = sharedLib.getCIMessageMap()
+            cimsg = sharedLib.getCIMessageMap()
             composeUrl = cimsg["compose-path"].replace(
                 "/mnt/redhat/", "http://download-node-02.eng.bos.redhat.com/"
             )
@@ -82,7 +86,8 @@ node("rhel-8-medium || ceph-qe-ci") {
             sharedLib.writeToReleaseFile(majorVersion, minorVersion, releaseMap)
 
             def bucket = "ceph-${majorVersion}.${minorVersion}-${platform}"
-            sharedLib.uploadCompose(bucket, cephVersion, composeUrl)
+            // Commenting uploadCompose as IBM environment is not available
+            // sharedLib.uploadCompose(bucket, cephVersion, composeUrl)
 
         }
 
@@ -115,28 +120,23 @@ node("rhel-8-medium || ceph-qe-ci") {
 
             sharedLib.SendUMBMessage(msgContent, overrideTopic, "ProductBuildDone")
             println "Updated UMB Message Successfully"
+            currentBuild.result = "SUCCESS"
         }
     } catch(Exception err) {
-        if (currentBuild.result == "ABORTED") {
-            println "Aborting the workflow."
+        failureReason = err.getMessage()
+        if (currentBuild.result != "ABORTED") {
+            currentBuild.result = "FAILURE"
+            println "Failure Reason: ${failureReason}"
         }
-
-        // notify about failure
-        currentBuild.result = "FAILURE"
-        def failureReason = err.getMessage()
-        def subject =  "[CEPHCI-PIPELINE-ALERT] [JOB-FAILURE] - ${env.JOB_NAME}/${env.BUILD_NUMBER}"
-        def body = "<body><h3><u>Job Failure</u></h3></p>"
-        body += "<dl><dt>Jenkins Build:</dt><dd>${env.BUILD_URL}</dd>"
-        body += "<dt>Failure Reason:</dt><dd>${failureReason}</dd></dl></body>"
-
-        emailext (
-            mimeType: 'text/html',
-            subject: "${subject}",
-            body: "${body}",
-            from: "cephci@redhat.com",
-            to: "cephci@redhat.com"
-        )
+    } finally {
+        rhcephVersion = "RHCEPH-${versions.major_version}.${versions.minor_version}"
+        composeInfo = [
+            "composeLabel": "${cimsg['compose-label']}",
+            "composeUrl": composeUrl
+        ]
+        def subject = "${env.JOB_NAME} ${currentBuild.result} for ${rhcephVersion} - ${cephVersion} (RC) Release Candidate build"
+        // emailLib.sendEmailForListener(rhcephVersion, cephVersion, composeInfo, cimsg, failureReason, subject)
         subject += "\n Jenkins URL: ${env.BUILD_URL}"
-        googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
+        // googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
     }
 }

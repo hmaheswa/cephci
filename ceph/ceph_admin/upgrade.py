@@ -1,4 +1,5 @@
 """Module that interfaces with ceph orch upgrade CLI."""
+
 from datetime import datetime, timedelta
 from json import loads
 from time import sleep
@@ -90,7 +91,7 @@ class UpgradeMixin:
             timeout (int):  Timeout in seconds (default:3600)
 
         """
-        interval = 5
+        interval = 7  # ceph orch down while upgrading mgr daemon BZ2313471
         end_time = datetime.now() + timedelta(seconds=timeout)
 
         while end_time > datetime.now():

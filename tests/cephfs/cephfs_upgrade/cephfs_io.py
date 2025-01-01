@@ -1,3 +1,5 @@
+import secrets
+import string
 import traceback
 from datetime import datetime, timedelta
 
@@ -25,7 +27,7 @@ def run(ceph_cluster, **kw):
         clients = ceph_cluster.get_ceph_objects("client")
         build = config.get("build", config.get("rhbuild"))
         fs_util.prepare_clients(clients, build)
-        fs_util.auth_list(clients)
+
         timeout = config.get("timeout", 1800)
         log.info("checking Pre-requisites")
         if not clients:
@@ -36,13 +38,27 @@ def run(ceph_cluster, **kw):
         client1 = clients[0]
         stats = {"total_iterations": 0, "smallfile": 0, "dd": 0}
         out, rc = client1.exec_command(
-            sudo=True, cmd="mount -t fuse.ceph-fuse | awk {'print $3'}", check_ec=False
+            sudo=True, cmd="mount -t ceph | awk {'print $3'}", check_ec=False
         )
+        if out == "":
+            mon_node_ip = fs_util.get_mon_node_ips()
+            mon_node_ip = ",".join(mon_node_ip)
+            kernel_mount_dir = "/mnt/" + "".join(
+                secrets.choice(string.ascii_uppercase + string.digits) for i in range(5)
+            )
+            fs_util.kernel_mount(clients, kernel_mount_dir, mon_node_ip)
+            mount_points = kernel_mount_dir
         mount_points = out.rstrip("\n")
         fuse_mount_points = mount_points.split("\n")
         out, rc = client1.exec_command(
-            sudo=True, cmd="mount -t ceph | awk {'print $3'}", check_ec=False
+            sudo=True, cmd="mount -t fuse.ceph-fuse | awk {'print $3'}", check_ec=False
         )
+        if out == "":
+            fuse_mount_dir = "/mnt/" + "".join(
+                secrets.choice(string.ascii_lowercase + string.digits) for i in range(5)
+            )
+            fs_util.fuse_mount(clients, fuse_mount_dir)
+            mount_points = fuse_mount_dir
         mount_points = out.rstrip("\n")
         kernel_mount_points = mount_points.split("\n")
         total_mounts = fuse_mount_points + kernel_mount_points
@@ -62,6 +78,22 @@ def run(ceph_cluster, **kw):
             function_called = fs_util.run_ios(client1, f"{total_mounts[0]}/run_ios")
             stats[function_called.__name__] += 1
             stats["total_iterations"] += 1
+
+        if config.get("client_upgrade", 0) == 1:
+            log.info("Upgrade Clients after Cluster upgrade")
+            upgrade_node = config.get("client_upgrade_node", "all")
+            if upgrade_node == "all":
+                for client in clients:
+                    cmd = "yum install -y --nogpgcheck ceph-common ceph-fuse"
+                    client.exec_command(sudo=True, cmd=cmd)
+            else:
+                client = [
+                    i if upgrade_node in i.node.hostname else None for i in clients
+                ][0]
+                if client is not None:
+                    cmd = "yum install -y --nogpgcheck ceph-common ceph-fuse"
+                    client.exec_command(sudo=True, cmd=cmd)
+
         return 0
     except KeyboardInterrupt:
         pass

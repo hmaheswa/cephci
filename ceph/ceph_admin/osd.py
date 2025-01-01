@@ -1,4 +1,5 @@
 """Manage OSD service via cephadm CLI."""
+
 import json
 from time import sleep
 from typing import Dict
@@ -60,7 +61,9 @@ class OSD(ApplyMixin, Orch):
             devices = {"available": [], "unavailable": []}
             for device in node.get("devices"):
                 # avoid considering devices which is less than 5GB
-                if "Insufficient space (<5GB)" not in device.get(
+                if not device.get(
+                    "rejected_reasons"
+                ) or "Insufficient space (<5GB)" not in device.get(
                     "rejected_reasons", []
                 ):
                     if device["available"]:
@@ -167,17 +170,16 @@ class OSD(ApplyMixin, Orch):
             config:
                 command: rm
                 base_cmd_args:
-                    verbose: true
+                    zap: true
                 pos_args:
                     - 1
         """
-
         base_cmd = ["ceph", "orch", "osd"]
-        if config.get("base_cmd_args"):
-            base_cmd.append(config_dict_to_string(config["base_cmd_args"]))
         base_cmd.append("rm")
         osd_id = config["pos_args"][0]
         base_cmd.append(str(osd_id))
+        if config.get("base_cmd_args"):
+            base_cmd.append(config_dict_to_string(config["base_cmd_args"]))
         self.shell(args=base_cmd)
 
         check_osd_id_dict = {
@@ -194,32 +196,33 @@ class OSD(ApplyMixin, Orch):
             try:
                 status = json.loads(out)
                 for osd_id_ in status:
-                    if osd_id_["osd_id"] == osd_id:
+                    if int(osd_id_["osd_id"]) == int(osd_id):
                         LOG.info(f"OSDs removal in progress: {osd_id_}")
+                        sleep(2)
+                        continue
+                    else:
                         break
-                else:
-                    break
-                sleep(2)
 
             except json.decoder.JSONDecodeError:
                 break
 
-        # validate OSD removal
-        out, verify = self.shell(
-            args=["ceph", "osd", "tree", "-f", "json"],
-        )
-        out = json.loads(out)
-        for id_ in out["nodes"]:
-            if id_["id"] == osd_id:
-                LOG.error("OSD Removed ID found")
-                raise AssertionError("fail, OSD is present still after removing")
-        LOG.info(f" OSD {osd_id} Removal is successfully")
+        if config.get("validate", True):
+            # validate OSD removal
+            out, verify = self.shell(
+                args=["ceph", "osd", "tree", "-f", "json"],
+            )
+            out = json.loads(out)
+            for id_ in out["nodes"]:
+                if int(id_["id"]) == int(osd_id):
+                    LOG.error("OSD Removed ID found")
+                    raise AssertionError("fail, OSD is present still after removing")
+        LOG.info(f" OSD {osd_id} Removal is successful")
 
     def out(self, config: Dict):
         """
         Execute the command ceph osd out.
         Args:
-            config (Dict): OSD Remove status configuration parameters
+            config (Dict): OSD 'out' configuration parameters
         Returns:
           output, error   returned by the command.
         Example::
@@ -236,3 +239,49 @@ class OSD(ApplyMixin, Orch):
         osd_id = config["pos_args"][0]
         base_cmd.append(str(osd_id))
         return self.shell(args=base_cmd)
+
+    def osd_in(self, config: dict):
+        """
+        Execute the command ceph osd in.
+        Args:
+            config (Dict): OSD 'in' configuration parameters
+        Returns:
+          output, error   returned by the command.
+        Example::
+            config:
+                command: in
+                base_cmd_args:
+                    verbose: true
+                pos_args:
+                    - 4
+        """
+        base_cmd = ["ceph", "osd", "in"]
+        if config.get("base_cmd_args"):
+            base_cmd.append(config_dict_to_string(config["base_cmd_args"]))
+        osd_id = config["pos_args"][0]
+        osd_ids = config["pos_args"][1]
+        any_all = config["pos_args"][2]
+
+        if any_all:
+            base_cmd.append("all")
+        else:
+            if osd_id is not None and osd_id.is_integer():
+                base_cmd.append(str(osd_id))
+            if osd_ids is not None:
+                base_cmd.extend([str(ele) for ele in osd_ids])
+        return self.shell(args=base_cmd)
+
+    def flag(self, config: dict):
+        """
+        Execute the command ceph osd set/unset flag.
+        Args:
+            config (Dict): OSD flag configuration parameters
+                command: set/unset
+                base_cmd_args:
+                    verbose: true
+                flag: value of flag
+        """
+        command = config.get("command")
+        flag = config.get("flag")
+        cmd = f"ceph osd {command} {flag}"
+        return self.shell(args=[cmd])

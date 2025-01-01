@@ -4,3 +4,7 @@ python-openstackclient
 xmltodict
 tfacon
 uplink
+awscli
+pylero
+python-dotenv
+smbprotocol

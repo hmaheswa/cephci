@@ -1,4 +1,5 @@
 """Collects the Baremetal information and creates the cephNode object."""
+
 from copy import deepcopy
 from os.path import expanduser
 from typing import List, Optional
@@ -62,7 +63,8 @@ class CephBaremetalNode:
                 command="id -u cephuser",
             )
 
-            if err:
+            if err.readLines():
+                LOG.debug(err.readLines())
                 self._create_user(name="cephuser")
             else:
                 LOG.debug("Reusing existing user account of cephuser.")
@@ -89,11 +91,13 @@ class CephBaremetalNode:
         self.rssh().exec_command(
             command=f"useradd {name} -p '$1$1fsNAJ7G$bx4Sz9VnpOnIygVKVaGCT.'"
         )
-        self.rssh().exec_command(command=f"install -d -m 700  /home/{name}/.ssh")
-        self.rssh().exec_command(
-            command=f"install -m 600 ~/.ssh/authorized_keys /home/{name}/.ssh/ || true"
-        )
-        self.rssh().exec_command(command=f"chown -R {name}:{name} /home/{name}/")
+
+        key_file = "~/.ssh/authorized_keys"
+        create_dir = f"install -d -m 700  -o {name} -g {name} /home/{name}/.ssh"
+        copy_file = f"install -m 600 -o {name} -g {name} {key_file} /home/{name}/.ssh/"
+        bash_script = f"if [ -f {key_file} ] ; then {create_dir}; {copy_file} ; fi"
+        self.rssh().exec_command(command=f"chown {name}:{name} /home/{name}")
+        self.rssh().exec_command(command=bash_script)
 
     @property
     def ip_address(self) -> str:

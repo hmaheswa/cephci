@@ -99,6 +99,9 @@ def sendEmail(
     if (artifactDetails.repository) {
         body += "<tr><td>Container Image</td><td>${artifactDetails.repository}</td></tr>"
     }
+    if (artifactDetails.rp_link) {
+        body += "<tr><td>Report Portal</td><td>${artifactDetails.rp_link}</td></tr>"
+    }
     if (artifactDetails.log) {
         body += "<tr><td>Log</td><td>${artifactDetails.log}</td></tr>"
     } else {
@@ -131,7 +134,7 @@ def sendEmail(
             subject = "${run_type} test report status for RHCEPH-${artifactDetails.rhcephVersion} ceph version:${artifactDetails.ceph_version} is ${status}"
         }
         if (run_type == "upstream") {
-            subject = "Upstream Ceph Version:${artifactDetails.ceph_version}-${artifactDetails.upstreamVersion} Automated test execution summary"
+            subject = "Upstream Ceph Version:${artifactDetails.ceph_version}-${artifactDetails.upstreamVersion} ${stageLevel.capitalize()} Automated test execution summary"
         }
     }
     else{
@@ -225,6 +228,9 @@ def sendConsolidatedEmail(
     }
     if (artifactDetails.repository) {
         body += "<tr><td>Container Image</td><td>${artifactDetails.repository}</td></tr>"
+    }
+    if (artifactDetails.rp_link) {
+        body += "<tr><td>Report Portal</td><td>${artifactDetails.rp_link}</td></tr>"
     }
     if (artifactDetails.log) {
         body += "<tr><td>Log</td><td>${artifactDetails.log}</td></tr>"
@@ -327,8 +333,8 @@ def uploadCompose(def rhBuild, def cephVersion, def baseUrl) {
 
         sh script: "${cpFile} && ${cmd} ${scriptFile} ${args}"
     } catch(Exception exc) {
-        println "Encountered a failure during compose upload."
         println exc
+        error("Encountered a failure during compose upload. ${exc}")
     }
 }
 
@@ -357,7 +363,7 @@ def uploadResults(def objKey, def dirName, def bucketName="qe-ci-reports") {
 }
 
 def writeToRecipeFile(
-    def buildType, def rhcephVersion, def dataPhase, def currentStage, def status, def infra="10.245.4.89"
+    def rhcephVersion, def dataPhase, def infra="10.245.4.89"
     ) {
     /*
         Method to update content to the recipe file
@@ -365,13 +371,7 @@ def writeToRecipeFile(
     def result = "results"
     def recipeFile = "/data/site/recipe/${rhcephVersion}.yaml"
     recipeFileExist(rhcephVersion, recipeFile, infra)
-    if("${buildType}" == "latest" || "${currentStage}" == "stage-1"){
-        sh "ssh $infra \"yq eval -i '.$dataPhase = .latest' $recipeFile\""
-        sh "ssh $infra \"yq e -i '.$dataPhase.$result.$currentStage = \\\"$status\\\"' $recipeFile\""
-    }
-    else{
-        sh "ssh $infra \"yq e -i '.$dataPhase.$result.$currentStage = \\\"$status\\\"' $recipeFile\""
-    }
+    sh "ssh $infra \"yq eval -i '.$dataPhase = .latest' $recipeFile\""
 }
 
 def executeTestSuite(
@@ -388,12 +388,15 @@ def executeTestSuite(
     */
     def rc = "PASS"
 
-    if (! vmPrefix?.trim()) {
-        def randString = sh(
+    def randString = sh(
             script: "cat /dev/urandom | tr -cd 'a-z0-9' | head -c 5",
             returnStdout: true
         ).trim()
+    if (! vmPrefix?.trim()) {
         vmPrefix = "ci-${randString}"
+    }
+    else{
+        vmPrefix = "ci-${vmPrefix}-${randString}"
     }
 
     def baseCmd = ".venv/bin/python run.py --log-level DEBUG"
@@ -440,7 +443,7 @@ def configureRpPreProc(
     }
 }
 
-def uploadTestResults(def sourceDir, def credPreproc, def runProperties) {
+def uploadTestResults(def sourceDir, def credPreproc, def runProperties, def stageLevel=null, def runType=null) {
     /*
         upload Xunit Xml file to report portal and polarion
 
@@ -458,6 +461,11 @@ def uploadTestResults(def sourceDir, def credPreproc, def runProperties) {
     def msgMap = getCIMessageMap()
     def credFile = "${sourceDir}/config.json"
 
+    def suitesWithStatus = [:]
+    runProperties['results'].each{suiteName, suiteStatus->
+        suitesWithStatus[suiteName] = suiteStatus['status']
+    }
+
     // Configure rp_preproc launch
     def launchConfig = [
         "name": "${runProperties['version']} - ${runProperties['stage']}",
@@ -466,14 +474,17 @@ def uploadTestResults(def sourceDir, def credPreproc, def runProperties) {
             "ceph_version": runProperties["ceph_version"],
             "rhcs": runProperties["version"].split('-')[1],
             "tier": runProperties["stage"],
+            "suites": suitesWithStatus,
         ]
     ]
+    if ( stageLevel ) {
+        launchConfig["name"] = runType + " " + launchConfig["name"] + " " + stageLevel
+    }
     credPreproc["reportportal"]["launch"] = launchConfig
     writeJSON file: credFile, json: credPreproc
 
     // Upload xml file to report portal
-    sh(script: ".venv/bin/python utility/rp_client.py -c ${credFile} -d ${sourceDir}/payload")
-
+    rp_launch_id = sh(returnStdout: true, script: ".venv/bin/python utility/rp_client.py -c ${credFile} -d ${sourceDir}/payload")
     // Upload test result to polarion using xUnit Xml file
     withCredentials([
         usernamePassword(
@@ -494,6 +505,10 @@ def uploadTestResults(def sourceDir, def credPreproc, def runProperties) {
             sh script: "${localCmd}"
         }
     }
+    def launch_rgex = (rp_launch_id =~ /launch id: (\d+)/)
+	if(launch_rgex){
+	return launch_rgex[0][1]
+	}
 }
 
 def fetchStageStatus(def testResults) {
@@ -652,6 +667,7 @@ def readFromReleaseFile(
 
     return dataContent
 }
+
 
 def setLock(def majorVer, def minorVer) {
     /*
@@ -828,6 +844,9 @@ def fetchStages(
         upstreamVersion - ex: pacific | quincy
     */
     println("Inside fetch stages from runner")
+
+    def runnerCLI = "cd ${env.WORKSPACE}/pipeline/scripts/ci;"
+
     def rhcephVersion
     if ( ! upstreamVersion ) {
         def RHCSVersion = [:]
@@ -843,13 +862,15 @@ def fetchStages(
         def majorVersion = RHCSVersion.major_version
         def minorVersion = RHCSVersion.minor_version
         rhcephVersion = "${majorVersion}.${minorVersion}"
+        runnerCLI = "${runnerCLI} ${env.WORKSPACE}/.venv/bin/python getTestsForPipeline.py"
     }
-    else { rhcephVersion = upstreamVersion }
+    else {
+        rhcephVersion = upstreamVersion
+        runnerCLI = "${runnerCLI} ${env.WORKSPACE}/.venv/bin/python getPipelineStages.py"
+    }
 
     def overridesStr = writeJSON returnText: true, json: overrides
 
-    def runnerCLI = "cd ${env.WORKSPACE}/pipeline/scripts/ci;"
-    runnerCLI = "${runnerCLI} ${env.WORKSPACE}/.venv/bin/python getPipelineStages.py"
     runnerCLI = "${runnerCLI} --rhcephVersion ${rhcephVersion}"
     runnerCLI = "${runnerCLI} --tags ${tags}"
     runnerCLI = "${runnerCLI} --overrides '${overridesStr}'"
@@ -904,7 +925,7 @@ def SendUMBMessage(def msgMap, def overrideTopic, def msgType) {
 
 }
 
-def updateUpstreamFile(def version) {
+def updateUpstreamFile(def version, def osType, def osVersion) {
     /*
         Updates upstream yaml file for the version passed as argument
 
@@ -918,7 +939,7 @@ def updateUpstreamFile(def version) {
         sh ".venv/bin/python3 -m pip install packaging"
         sh "sudo yum install podman -y"
         def scriptFile = "pipeline/scripts/ci/upstream_cli.py"
-        def args = "build ${version}"
+        def args = "build ${version} --os-type ${osType} --os-version ${osVersion}"
         sh script: "${cmd} ${scriptFile} ${args}"
     } catch(Exception exc) {
         error "${exc}"
@@ -946,8 +967,8 @@ def returnSnippet() {
 }
 
 def readFromConfluenceMetadata(
-    def file = "confluence_metadata.yaml",
-    def location="/ceph/cephci-jenkins/results"
+    def file = ".confluence_metadata.yaml",
+    def location="/ceph/cephci-jenkins/"
     ){
     /*
         Method to read metadata info about confluence.
@@ -1107,5 +1128,55 @@ def updateConfluencePage(
     println("Confluence page updated with content")
 }
 
+def getBuildUser() {
+    println("Inside build user")
+    println("${currentBuild.getBuildCauses()[0]}")
+    buildUserId = "${currentBuild.getBuildCauses()[0].userId}"
+    buildUserEmail =  "${currentBuild.getBuildCauses()[0].userId}@redhat.com"
+    buildUserName = "${currentBuild.getBuildCauses()[0].userName}"
+    return [
+        "buildUserId": "${buildUserId}",
+        "buildUserEmail": "${buildUserEmail}",
+        "buildUserName": "${buildUserName}"
+    ]
+}
+
+def getNodeList(def clusterConf){
+    def conf = yamlToMap(clusterConf, env.WORKSPACE)
+    def nodeList = []
+
+    conf.globals.each { globalConfig ->
+        def nodesMap = globalConfig["ceph-cluster"].nodes
+        nodesMap.each { item ->
+            nodeList.add(item.hostname)
+        }
+    }
+
+    return nodeList
+}
+
+def reimageNodes(def platform, def nodelist) {
+    // Reimage nodes in Octo lab
+    sh (
+        script: "bash ${env.WORKSPACE}/pipeline/scripts/ci/reimage-octo-node.sh --platform ${platform} --nodes ${nodelist}"
+    )
+}
+
+def get_ceph_version(rhcephVersion){
+    def cephVersion = 'reef'
+    if(rhcephVersion.contains("6.")){
+        cephVersion = 'quincy'
+    }
+    else if(rhcephVersion.contains("5.")){
+        cephVersion = 'pacific'
+    }
+    else if(rhcephVersion.contains("3.")){
+        cephVersion = 'luminous'
+    }
+    else if(rhcephVersion.contains("4.")){
+        cephVersion = 'nautilus'
+    }
+    return cephVersion
+}
 
 return this;

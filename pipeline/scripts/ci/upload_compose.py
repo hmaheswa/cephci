@@ -9,6 +9,7 @@ Note:
     we would create .repo files in /etc/yum.conf.d/ for sync operations. Also, the
     script works only on CentOS-7 due to options provided for reposync.
 """
+
 import logging
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from docopt import docopt
 from jinja2 import Template
 
 from storage.ibm_cos import CloudObjectStorage
+from utility.retry import retry
 
 LOG = logging.getLogger(__name__)
 REPO_TEMPLATE = """
@@ -132,6 +134,7 @@ def compress_build(repos: List) -> str:
     return repo_dir
 
 
+@retry(BaseException, tries=5, delay=30)
 def upload_directory(local_dir: str, bucket: str, item: str) -> None:
     """
     Uploads the given file to the provided bucket with the mentioned name.

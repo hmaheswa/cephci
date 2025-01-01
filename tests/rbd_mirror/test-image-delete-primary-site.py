@@ -1,7 +1,32 @@
-from tests.rbd_mirror import rbd_mirror_utils as rbdmirror
+from tests.rbd_mirror.rbd_mirror_utils import rbd_mirror_config
 from utility.log import Log
 
 log = Log(__name__)
+
+
+def test_image_delete_from_primary(rbd_mirror, pool_type, **kw):
+    try:
+        mirror1 = rbd_mirror.get("mirror1")
+        mirror2 = rbd_mirror.get("mirror2")
+        config = kw.get("config")
+        pool = config[pool_type]["pool"]
+        image = config[pool_type]["image"]
+        imagespec = pool + "/" + image
+
+        mirror1.benchwrite(imagespec=imagespec, io=config[pool_type].get("io_total"))
+
+        mirror1.delete_image(imagespec)
+        if mirror2.image_exists(imagespec):
+            return 0
+
+    except Exception as e:
+        log.exception(e)
+
+    # Cleans up the pool configuration
+    finally:
+        mirror1.clean_up(peercluster=mirror2, pools=[pool])
+
+    return 1
 
 
 def run(**kw):
@@ -29,46 +54,20 @@ def run(**kw):
     2. Delete the image when contents are getting mirrored.
     3. Make sure that image is deleted in secondary site.
     """
-    try:
-        log.info("Starting RBD mirroring test case - 9501")
-        config = kw.get("config")
-        mirror1, mirror2 = [
-            rbdmirror.RbdMirror(cluster, config)
-            for cluster in kw.get("ceph_cluster_dict").values()
-        ]
-        poolname = mirror1.random_string() + "_ceph_9501"
-        imagename = mirror1.random_string() + "_ceph_9501"
-        imagespec = poolname + "/" + imagename
+    log.info("Starting RBD mirroring test case - 9501")
+    mirror_obj = rbd_mirror_config(**kw)
 
-        initial_config(
-            mirror1,
-            mirror2,
-            poolname,
-            imagespec,
-            imagesize=config.get("imagesize", "1G"),
-        )
-        mirror1.benchwrite(imagespec=imagespec, io=config.get("io-total", "1G"))
+    if mirror_obj:
+        log.info("Executing test on replicated pool")
+        if test_image_delete_from_primary(
+            mirror_obj.get("rep_rbdmirror"), "rep_pool_config", **kw
+        ):
+            return 1
 
-        mirror1.delete_image(imagespec)
-        if mirror2.image_exists(imagespec):
-            return 0
+        log.info("Executing test on ec pool")
+        if test_image_delete_from_primary(
+            mirror_obj.get("ec_rbdmirror"), "ec_pool_config", **kw
+        ):
+            return 1
 
-    except Exception as e:
-        log.exception(e)
-
-    return 1
-
-
-def initial_config(mirror1, mirror2, poolname, imagespec, imagesize):
-    """
-    Calls create_pool function on both the clusters,
-    creates an image on primary cluster and
-    waits for image to be present in secondary cluster with replying status
-    """
-    mirror1.create_pool(poolname=poolname)
-    mirror2.create_pool(poolname=poolname)
-    mirror1.create_image(imagespec=imagespec, size=imagesize)
-    mirror1.config_mirror(mirror2, poolname=poolname, mode="pool")
-    mirror2.wait_for_status(poolname=poolname, images_pattern=1)
-    mirror1.wait_for_status(imagespec=imagespec, state_pattern="up+stopped")
-    mirror2.wait_for_status(imagespec=imagespec, state_pattern="up+replaying")
+    return 0

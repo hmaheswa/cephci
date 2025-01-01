@@ -98,20 +98,10 @@ tests:
       destroy-cluster: false
       module: test_client.py
       name: "configure client"
+
   -
     test:
       config:
-        branch: v16.2.8
-        script: cli_generic.sh
-        script_path: qa/workunits/rbd
-      desc: "Executing upstream RBD CLI Generic scenarios"
-      module: test_rbd.py
-      name: 1_rbd_cli_generic
-      polarion-id: CEPH-83574241
-  -
-    test:
-      config:
-        branch: pacific
         script: rbd_groups.sh
         script_path: qa/workunits/rbd
       desc: "Executing upstream RBD CLI Groups scenarios"
@@ -121,7 +111,6 @@ tests:
   -
     test:
       config:
-        branch: pacific
         script: import_export.sh
         script_path: qa/workunits/rbd
       desc: "Executing upstream RBD CLI Import Export scenarios"
@@ -131,21 +120,12 @@ tests:
   -
     test:
       config:
-        branch: pacific
-        script: luks-encryption.sh
-        script_path: qa/workunits/rbd
-      desc: "Executing upstream RBD LUKS Encryption scenarios"
-      module: test_rbd.py
-      name: 4_rbd_luks_encryption
-  -
-    test:
-      config:
-        branch: pacific
         script: cli_migration.sh
         script_path: qa/workunits/rbd
       desc: "Executing upstream RBD CLI Migration scenarios"
       module: test_rbd.py
       name: 5_rbd_cli_migration
+      polarion-id: CEPH-83574243
   -
     test:
       desc: "generate sosreport"

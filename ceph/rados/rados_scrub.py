@@ -19,7 +19,9 @@
    5. verify_scrub  method used for the verification of scheduled scrub
       happened or not.
 """
+
 import datetime
+import json
 from collections import defaultdict
 
 from ceph.rados.core_workflows import RadosOrchestrator
@@ -61,7 +63,6 @@ class RadosScrubber(RadosOrchestrator):
             return 1
 
     def get_pg_dump(self, *args):
-
         """
         Used to get the pg dump logs
 
@@ -89,23 +90,26 @@ class RadosScrubber(RadosOrchestrator):
         else:
             return pgDump
 
-    def verify_scrub(self, before_scrub_data, after_scrub_data):
+    def verify_scrub_deepscrub(self, before_scrub_data, after_scrub_data, flag):
         """
-        Used to validate the scrubbing done or not
+        Used to validate the scrubbing and deep scrubbing done or not
 
         Args:
             1.before_scrub_data - It is dictionary which conatin the
               pgId and last scrub time data before scrubbing.
             2.after_scrub_data - It is a dictionary that conatins the
               PDId and lst surb time data after scrubbing.
+            3.flag - scrub or deep-scrub
         Return: 0 for Pass or 1 for Failure
         """
+        if flag == "scrub":
+            stamp = "last_scrub_stamp"
+        else:
+            stamp = "last_deep_scrub_stamp"
         before_scrub_log = dict(
-            zip(before_scrub_data["pgid"], before_scrub_data["last_scrub_stamp"])
+            zip(before_scrub_data["pgid"], before_scrub_data[stamp])
         )
-        after_scrub_log = dict(
-            zip(after_scrub_data["pgid"], after_scrub_data["last_scrub_stamp"])
-        )
+        after_scrub_log = dict(zip(after_scrub_data["pgid"], after_scrub_data[stamp]))
 
         number_of_pgs = len(before_scrub_log.keys())
         count_pg = 0
@@ -174,9 +178,46 @@ class RadosScrubber(RadosOrchestrator):
                 norebalance|norecover|noscrub|nodeep-scrub|notieragent
         Returns: True/False
         """
+        if value == "pause":
+            chk_string = f"pauserd,pausewr is {flag}"
+        else:
+            chk_string = f"{value} is {flag}"
+
         cmd = f"ceph osd {flag} {value}"
         out, err = self.node.shell([cmd])
-        if err:
-            log.info(f"The OSD falg {value} not {flag} on the cluster. Error: {err}")
-            return False
-        return True
+        if chk_string in out or chk_string in err:
+            log.info(f"The OSD falg {value} is {flag} on the cluster.")
+            return True
+        log.error(f"Failed to {flag} OSD flag {value}")
+        return False
+
+    def get_dump_scrubs(self, osd_id):
+        """
+        Method is used to return the osd dump scrubs
+         Args:
+             osd_id: osd id number
+        Returns:
+              Dump scrub output in the json format.
+        """
+        base_cmd = f"cephadm shell --name osd.{osd_id} ceph daemon  osd.{osd_id}  dump_scrubs -f json 2>/dev/null"
+        acting_osd_node = self.fetch_host_node(daemon_type="osd", daemon_id=osd_id)
+        out_put_tuple = acting_osd_node.exec_command(sudo=True, cmd=base_cmd)
+        out_put = tuple(x for x in out_put_tuple if x)
+        return json.loads(out_put[0])
+
+    def get_pg_dump_scrub(self, osd_id, pg_id):
+        """
+        Method is used to retrive the dump scrub of a pg
+        Args:
+             osd_id: osd id number
+             pg_id: pg id
+        Returns:
+              Dump scrub output of a PG in the json format.
+
+        """
+        dump_scrub = self.get_dump_scrubs(osd_id)
+        for pg_no in dump_scrub:
+            if pg_no["pgid"] == pg_id:
+                return pg_no
+        log.error(f"The provided {pg_id} is not exist in dump scrub")
+        return None

@@ -8,11 +8,11 @@ def recipeFileDir = "/ceph/cephci-jenkins/latest-rhceph-container-info"
 // Default job parameters
 def buildType = "${params.buildType}" ? "tier-1" : "${params.buildType}"
 def overrides = "${params.overrides}" ? "{}" : "${params.overrides}"
-def tags = "${params.tags}" ? "schedule,psi,tier-1,stage-1" : "${params.tags}"
+def tags = "${params.tags}" ? "schedule,tier-1,stage-1,openstack" : "${params.tags}"
 
 
 // Pipeline script entry point
-node("rhel-8-medium || ceph-qe-ci") {
+node("rhel-9-medium || ceph-qe-ci") {
     stage('prepareNode') {
         if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
         checkout(
@@ -53,9 +53,17 @@ node("rhel-8-medium || ceph-qe-ci") {
             error("There no new RHCS build since last Friday")
         }
 
+        println("Valid recipe files : ${validRecipeFiles}")
+
         for (validRecipeFile in validRecipeFiles) {
             def rhcephVersion = validRecipeFile.split("/").last().replace(".yaml", "")
+            def ver = rhcephVersion.split("-")[1]
+            if (ver < "4"){
+                println("Skipping execution for RHCEPH-${ver} build")
+                continue
+            }
             def recipeContent = readYaml file: "${validRecipeFile}"
+            recipeContent = recipeContent["tier-0"]
             recipeContent = writeJSON returnText: true, json:  recipeContent
 
             println "Starting test execution with parameters:"
@@ -69,7 +77,7 @@ node("rhel-8-medium || ceph-qe-ci") {
                     string(name: 'tags', value: tags),
                     string(name: 'buildType', value: buildType.toString()),
                     string(name: 'overrides', value: overrides.toString()),
-                    string(name: 'buildArtifacts', value: recipeContent.get("tier-0").toString())]
+                    string(name: 'buildArtifacts', value: recipeContent.toString())]
             ])
         }
     }

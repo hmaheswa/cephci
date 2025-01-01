@@ -10,7 +10,7 @@ def releaseDetails = [:]
 
 // Pipeline script entry point
 
-node("rhel-8-medium || ceph-qe-ci") {
+node("rhel-9-medium || ceph-qe-ci") {
 
     try {
         stage('prepareNode') {
@@ -85,7 +85,7 @@ node("rhel-8-medium || ceph-qe-ci") {
                     "name": "Red Hat Ceph Storage",
                     "version": cephVersion,
                     "nvr": "RHCEPH-${versions.major_version}.${versions.minor_version}",
-                    "phase": "tier-0",
+                    "phase": "sanity",
                     "build_action": "latest"
                 ],
                 "contact": [
@@ -115,6 +115,33 @@ node("rhel-8-medium || ceph-qe-ci") {
 
             lib.SendUMBMessage(msgContent, overrideTopic, msgType)
         }
+
+        stage("Trigger pipeline tier executor") {
+            def buildType = "latest"
+            def tags = "sanity,tier-0,stage-1,openstack"
+            def overrides = [:]
+            def overridesStr = writeJSON returnText: true, json: overrides
+
+            rhcephVersion = "RHCEPH-${versions.major_version}.${versions.minor_version}"
+            def recipeFileContent = lib.yamlToMap("${rhcephVersion}.yaml")
+            def content = recipeFileContent['latest']
+            def buildArtifacts = writeJSON returnText: true, json: content
+            println "recipeFile ceph-version : ${content['ceph-version']}"
+            println "Starting test execution with parameters:"
+            println "\trhcephVersion: ${rhcephVersion}\n\tbuildType: ${buildType}\n\tbuildArtifacts: ${buildArtifacts}\n\toverrides: ${overrides}\n\ttags: ${tags}"
+
+             build ([
+                wait: false,
+                job: "rhceph-test-execution-pipeline",
+                parameters: [
+                    string(name: 'rhcephVersion', value: rhcephVersion.toString()),
+                    string(name: 'tags', value: tags),
+                    string(name: 'buildType', value: buildType),
+                    string(name: 'overrides', value: overridesStr),
+                    string(name: 'buildArtifacts', value: buildArtifacts.toString())]
+            ])
+        }
+
     } catch(Exception err) {
         if (currentBuild.result != "ABORTED") {
             // notify about failure
@@ -125,15 +152,15 @@ node("rhel-8-medium || ceph-qe-ci") {
             body += "<dl><dt>Jenkins Build:</dt><dd>${env.BUILD_URL}</dd>"
             body += "<dt>Failure Reason:</dt><dd>${failureReason}</dd></dl></body>"
 
-            emailext (
-                mimeType: 'text/html',
-                subject: "${subject}",
-                body: "${body}",
-                from: "cephci@redhat.com",
-                to: "cephci@redhat.com"
-            )
+            // emailext (
+            //     mimeType: 'text/html',
+            //     subject: "${subject}",
+            //     body: "${body}",
+            //     from: "cephci@redhat.com",
+            //     to: "cephci@redhat.com"
+            // )
             subject += "\n Jenkins URL: ${env.BUILD_URL}"
-            googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
+            // googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
         }
     }
 }

@@ -7,6 +7,7 @@ def sharedLib
 def rhcephVersion
 def tags_list
 def tierLevel
+def tierNumber
 def stageLevel
 def currentStageLevel = ""
 def overrides
@@ -14,8 +15,12 @@ def buildArtifacts
 def buildType
 def final_stage = false
 def run_type
-def nodeName = "rhel-8-medium || ceph-qe-ci"
+def nodeName = "rhel-9-medium"
 def tags = ""
+def majorVersion
+def minorVersion
+def buildStatus = "pass"
+def is_openstack_run = false
 
 def branch='origin/master'
 def repo='https://github.com/red-hat-storage/cephci.git'
@@ -32,7 +37,7 @@ if (params.containsKey('tags')){
     tags=params.tags
     tags_list = tags.split(',') as List
     if (tags_list.contains('ibmc')){
-        nodeName = "agent-01 || ceph-qe-ci"
+        nodeName = "agent-rhel9"
     }
 }
 
@@ -45,7 +50,7 @@ node(nodeName) {
                 branches: [[name: branch]],
                 extensions: [[
                     $class: 'CleanBeforeCheckout',
-                        deleteUntrackedNestedRepositories: true
+                    deleteUntrackedNestedRepositories: true
                 ], [
                     $class: 'WipeWorkspace'
                 ], [
@@ -95,6 +100,12 @@ node(nodeName) {
         tags_list = tags.split(',') as List
         def index = tags_list.findIndexOf { it ==~ /tier-\w+/ }
         tierLevel = tags_list.get(index)
+
+        tierNumber = tierLevel.split("-") as List
+        tierNumber = tierNumber[1] as Integer
+        if (tierNumber > 2){
+            error "Executions for tiers above tier 2 is not supported in this pipeline"
+        }
         def stageIndex = tags_list.findIndexOf { it ==~ /stage-\w+/ }
         currentStageLevel = tags_list.get(stageIndex)
 
@@ -114,8 +125,12 @@ node(nodeName) {
             overrides.put("build", "rc")
         }
 
-        if ("openstack" in tags_list){
-            def (majorVersion, minorVersion) = rhcephVersion.substring(7,).tokenize(".")
+        if (tags_list.findAll{element -> element.contains('openstack')}){
+            is_openstack_run = true
+        }
+
+        if (is_openstack_run){
+            (majorVersion, minorVersion) = rhcephVersion.substring(7,).tokenize(".")
             /*
                Read the release yaml contents to get contents,
                before other listener/Executor Jobs updates it.
@@ -123,10 +138,84 @@ node(nodeName) {
             releaseContent = sharedLib.readFromReleaseFile(
                 majorVersion, minorVersion, lockFlag=false
             )
+            println("releaseContent")
             println(releaseContent)
+            def workspace = "${env.WORKSPACE}"
+            def build_number = "${currentBuild.number}"
+            overrides.put("workspace", workspace.toString())
+            overrides.put("build_number", build_number.toInteger())
+            def recipeFileContent = sharedLib.yamlToMap("${rhcephVersion}.yaml")
+            def content = recipeFileContent['latest']
+            println "recipeFile ceph-version : ${content['ceph-version']}"
+            def currentCephVersion = buildArtifacts['ceph-version'] ?: buildArtifacts['recipe']['ceph-version']
+            println "buildArtifacts ceph-version : ${currentCephVersion}"
+            if ("schedule_openstack_only" in tags_list || "schedule" in tags_list){
+                run_type = "PSI-Only Schedule Run"
+            } else if ("rc" in tags_list || buildType == "rc"){
+                run_type = "PSI-Only RC Sanity Run"
+            } else {
+                run_type = "PSI-Only Sanity Run"
+            }
+            if ( currentCephVersion != content['ceph-version']) {
+                currentBuild.result = "ABORTED"
+                def msgMap = [
+                    "artifact": [
+                        "type": "product-build",
+                        "name": "Red Hat Ceph Storage",
+                        "version": buildArtifacts["ceph-version"],
+                        "nvr": rhcephVersion,
+                        "phase": "testing",
+                        "build": "tier-0",
+                    ],
+                    "contact": [
+                        "name": "Downstream Ceph QE",
+                        "email": "cephci@redhat.com",
+                    ],
+                    "system": [
+                        "os": "centos-7",
+                        "label": "agent-01",
+                        "provider": "IBM-Cloud",
+                    ],
+                    "pipeline": [
+                        "name": tierLevel,
+                        "id": currentBuild.number,
+                        "tags": tags,
+                        "overrides": overrides,
+                        "run_type": run_type,
+                        "final_stage": true,
+                    ],
+                    "run": [
+                        "url": env.RUN_DISPLAY_URL,
+                        "additional_urls": [
+                            "doc": "https://docs.engineering.redhat.com/display/rhcsqe/RHCS+QE+Pipeline",
+                            "repo": "https://github.com/red-hat-storage/cephci",
+                            "report": "https://reportportal-rhcephqe.apps.ocp4.prod.psi.redhat.com/",
+                            "tcms": "https://polarion.engineering.redhat.com/polarion/",
+                        ],
+                    ],
+                    "test": [
+                        "type": buildType,
+                        "category": "functional",
+                        "result": "ABORTED",
+                        "object-prefix": null,
+                    ],
+                    "recipe": buildArtifacts,
+                    "generated_at": env.BUILD_ID,
+                    "version": "3.0.0",
+                ]
+
+                def msgType = "Custom"
+
+                sharedLib.SendUMBMessage(
+                    msgMap,
+                    "VirtualTopic.qe.ci.rhcephqe.product-build.test.complete",
+                    msgType,
+                )
+                error "Aborting the execution as new builds are available.."
+            }
         }
 
-        if("ibmc" in tags_list) {
+        if("ibmc" in tags_list || "sanity" in tags_list || "schedule" in tags_list) {
             def workspace = "${env.WORKSPACE}"
             def build_number = "${currentBuild.number}"
             overrides.put("workspace", workspace.toString())
@@ -135,12 +224,65 @@ node(nodeName) {
         print(overrides)
         // Till the pipeline matures, using the build that has passed tier-0 suite.
 
-        if (tags_list.containsAll(["ibmc","sanity"]) && (tierLevel != "tier-0")){
-            def recipeFileContent = sharedLib.readFromRecipeFile(rhcephVersion)
+         if (tags_list.containsAll(["sanity"]) && (tierLevel != "tier-0")){
+            def recipeFileContent = sharedLib.readFromReleaseFile(majorVersion, minorVersion, lockFlag=false)
             def content = recipeFileContent['latest']
             println "recipeFile ceph-version : ${content['ceph-version']}"
             println "buildArtifacts ceph-version : ${buildArtifacts['ceph-version']}"
             if ( buildArtifacts['ceph-version'] != content['ceph-version']) {
+                 def msgMap = [
+                    "artifact": [
+                        "type": "product-build",
+                        "name": "Red Hat Ceph Storage",
+                        "version": buildArtifacts["ceph-version"],
+                        "nvr": rhcephVersion,
+                        "phase": "testing",
+                        "build": "tier-0",
+                    ],
+                    "contact": [
+                        "name": "Downstream Ceph QE",
+                        "email": "cephci@redhat.com",
+                    ],
+                    "system": [
+                        "os": "centos-7",
+                        "label": "agent-01",
+                        "provider": "IBM-Cloud",
+                    ],
+                    "pipeline": [
+                        "name": tierLevel,
+                        "id": currentBuild.number,
+                        "tags": tags,
+                        "overrides": overrides,
+                        "run_type": run_type,
+                        "final_stage": true,
+                    ],
+                    "run": [
+                        "url": env.RUN_DISPLAY_URL,
+                        "additional_urls": [
+                            "doc": "https://docs.engineering.redhat.com/display/rhcsqe/RHCS+QE+Pipeline",
+                            "repo": "https://github.com/red-hat-storage/cephci",
+                            "report": "https://reportportal-rhcephqe.apps.ocp4.prod.psi.redhat.com/",
+                            "tcms": "https://polarion.engineering.redhat.com/polarion/",
+                        ],
+                    ],
+                    "test": [
+                        "type": buildType,
+                        "category": "functional",
+                        "result": "ABORTED",
+                        "object-prefix": null,
+                    ],
+                    "recipe": buildArtifacts,
+                    "generated_at": env.BUILD_ID,
+                    "version": "3.0.0",
+                ]
+
+                def msgType = "Custom"
+
+                sharedLib.SendUMBMessage(
+                    msgMap,
+                    "VirtualTopic.qe.ci.rhcephqe.product-build.test.complete",
+                    msgType,
+                )
                 currentBuild.result = "ABORTED"
                 error "Aborting the execution as new builds are available.."
             }
@@ -153,25 +295,128 @@ node(nodeName) {
         testStages = fetchStages["testStages"]
         final_stage = fetchStages["final_stage"]
         println("final_stage : ${final_stage}")
-        currentBuild.description = "${params.rhcephVersion} - ${tierLevel} - ${currentStageLevel}"
+        ceph_version = buildArtifacts['ceph-version'] ?: buildArtifacts['recipe']['ceph-version']
+        currentBuild.description = "${params.rhcephVersion} - ${tierLevel} - ${currentStageLevel} \n ceph-version : ${ceph_version}"
     }
 
     parallel testStages
 
-    if ("openstack" in tags_list || "openstack-only" in tags_list){
+    if (is_openstack_run){
         stage('Publish Results') {
-        /* Publish results through E-mail to user who started the run*/
-            build_url = env.BUILD_URL
-            run_type = "Manual Run"
-            if ("openstack-only" in tags_list){
-                run_type = "PSI Only Run"
+
+            // Copy all the results into one folder before upload
+            def dirName = "psi_${currentBuild.projectName}_${currentBuild.number}"
+            def targetDir = "${env.WORKSPACE}/${dirName}/results"
+            def attachDir = "${env.WORKSPACE}/${dirName}/attachments"
+
+            sh (script: "mkdir -p ${targetDir} ${attachDir}")
+            print(testResults)
+            testResults.each { key, value ->
+                def fileName = key.replaceAll(" ", "-")
+                def logDir = value["logdir"]
+                sh "find ${logDir} -maxdepth 1 -type f -name xunit.xml -exec cp '{}' ${targetDir}/${fileName}.xml \\;"
+                sh "tar -zcvf ${logDir}/${fileName}.tar.gz ${logDir}/*.log"
+                sh "mkdir -p ${attachDir}/${fileName}"
+                sh "cp ${logDir}/${fileName}.tar.gz ${attachDir}/${fileName}/"
+                sh "find ${logDir} -maxdepth 1 -type f -not -size 0 -name '*.err' -exec cp '{}' ${attachDir}/${fileName}/ \\;"
             }
-            sharedLib.sendEmail(
-                run_type,
-                testResults,
-                sharedLib.buildArtifactsDetails(releaseContent, rhcephVersion, overrides.get("build")),
-                tierLevel.capitalize(),
-                currentStageLevel.capitalize()
+
+            println("directories created..")
+
+            // Adding metadata information
+            def recipeMap = sharedLib.readFromReleaseFile(
+                majorVersion, minorVersion, lockFlag=false
+            )
+            println("recipeMap : ${recipeMap}")
+            println("tierLevel : ${tierLevel}")
+
+            // Using only Tier-0 as pipeline progresses even if intermediate stages fail.
+            def tier = "latest"
+            if(tierLevel != "tier-0"){
+                tier = "tier-0"
+            }
+            println("tier: ${tier}")
+            def content = recipeMap[tier]
+            content["product"] = "Red Hat Ceph Storage"
+            content["version"] = rhcephVersion
+            content["date"] = sh(returnStdout: true, script: "date")
+            content["log"] = env.RUN_DISPLAY_URL
+            content["stage"] = tierLevel
+            content["results"] = testResults
+
+            writeYaml file: "${env.WORKSPACE}/${dirName}/metadata.yaml", data: content
+            sh "sudo cp -r ${env.WORKSPACE}/${dirName} /ceph/cephci-jenkins"
+
+            run_type = "Manual Run"
+            if (is_openstack_run){
+                if ("schedule_openstack_only" in tags_list || "schedule" in tags_list){
+                    run_type = "PSI-Only Schedule Run"
+                } else if ("rc" in tags_list || buildType == "rc"){
+                    run_type = "PSI-Only RC Sanity Run"
+                } else {
+                    run_type = "PSI-Only Sanity Run"
+                }
+            }
+
+            testStatus = "SUCCESS"
+            if ("FAIL" in sharedLib.fetchStageStatus(testResults)) {
+                currentBuild.result = "FAILED"
+                buildStatus = "fail"
+                testStatus = "FAILURE"
+            }
+
+            def msgMap = [
+                "artifact": [
+                    "type": "product-build",
+                    "name": "Red Hat Ceph Storage",
+                    "version": content["ceph-version"],
+                    "nvr": rhcephVersion,
+                    "phase": "testing",
+                    "build": "tier-0",
+                ],
+                "contact": [
+                    "name": "Downstream Ceph QE",
+                    "email": "cephci@redhat.com",
+                ],
+                "system": [
+                    "os": "centos-7",
+                    "label": "agent-01",
+                    "provider": "IBM-Cloud",
+                ],
+                "pipeline": [
+                    "name": tierLevel,
+                    "id": currentBuild.number,
+                    "tags": tags,
+                    "overrides": overrides,
+                    "run_type": run_type,
+                    "final_stage": final_stage,
+                ],
+                "run": [
+                    "url": env.RUN_DISPLAY_URL,
+                    "additional_urls": [
+                        "doc": "https://docs.engineering.redhat.com/display/rhcsqe/RHCS+QE+Pipeline",
+                        "repo": "https://github.com/red-hat-storage/cephci",
+                        "report": "https://reportportal-rhcephqe.apps.ocp4.prod.psi.redhat.com/",
+                        "tcms": "https://polarion.engineering.redhat.com/polarion/",
+                    ],
+                ],
+                "test": [
+                    "type": buildType,
+                    "category": "functional",
+                    "result": testStatus,
+                    "object-prefix": dirName,
+                ],
+                "recipe": buildArtifacts,
+                "generated_at": env.BUILD_ID,
+                "version": "3.0.0",
+            ]
+
+            def msgType = "Custom"
+
+            sharedLib.SendUMBMessage(
+                msgMap,
+                "VirtualTopic.qe.ci.rhcephqe.product-build.test.complete",
+                msgType,
             )
         }
 
@@ -179,7 +424,6 @@ node(nodeName) {
             println("Inside post build action")
             buildArtifacts = writeJSON returnText: true, json: buildArtifacts
             def nextbuildType = buildType
-            def buildStatus = "pass"
             if (final_stage){
                 def tierValue = tierLevel.split("-")
                 Increment_tier= tierValue[1].toInteger()+1
@@ -203,12 +447,11 @@ node(nodeName) {
             }
             overrides = writeJSON returnText: true, json: overrides
 
-            if ("FAIL" in sharedLib.fetchStageStatus(testResults)) {
-                currentBuild.result = "FAILED"
-                buildStatus = "fail"
-            }
             // Execute post tier based on run execution
-            if(!final_stage || (final_stage && tierLevel != "tier-2")){
+            // Do not trigger next stage of execution
+            // if the current stage was final_stage of a particular tier and tier is greater than 2
+            //    because the pipeline supports execution only till tier-2, tier-3 onwards will be part of system test
+            if(!final_stage || (final_stage && tierNumber < 2)){
                 build ([
                     wait: false,
                     job: "rhceph-test-execution-pipeline",
@@ -267,6 +510,13 @@ node(nodeName) {
             writeYaml file: "${env.WORKSPACE}/${dirName}/metadata.yaml", data: content
             sharedLib.uploadResults(dirName, "${env.WORKSPACE}/${dirName}")
 
+            testStatus = "SUCCESS"
+            if ("FAIL" in sharedLib.fetchStageStatus(testResults)) {
+                currentBuild.result = "FAILED"
+                buildStatus = "fail"
+                testStatus = "FAILURE"
+            }
+
             def msgMap = [
                 "artifact": [
                     "type": "product-build",
@@ -305,7 +555,7 @@ node(nodeName) {
                 "test": [
                     "type": buildType,
                     "category": "functional",
-                    "result": currentBuild.currentResult,
+                    "result": testStatus,
                     "object-prefix": dirName,
                 ],
                 "recipe": buildArtifacts,
@@ -326,7 +576,6 @@ node(nodeName) {
             println("Inside post build action")
             buildArtifacts = writeJSON returnText: true, json: buildArtifacts
             def nextbuildType = buildType
-            def buildStatus = "pass"
             if (final_stage){
                 def tierValue = tierLevel.split("-")
                 Increment_tier= tierValue[1].toInteger()+1
@@ -350,16 +599,12 @@ node(nodeName) {
             }
             overrides = writeJSON returnText: true, json: overrides
 
-            if ("FAIL" in sharedLib.fetchStageStatus(testResults)) {
-                currentBuild.result = "FAILED"
-                buildStatus = "fail"
-            }
             // Do not trigger next stage of execution
-                // 1) if the current tier executed is tier-0 and it failed
-                // 2) if the current stage was final_stage of a particular tier and tier is not tier-2
-                //    because the pipeline supports execution only till tier-2, tier-3 onwards will be part of system test
+            // 1) if the current tier executed is tier-0 and it failed
+            // 2) if the current stage was final_stage of a particular tier and tier is greater than 2
+            //    because the pipeline supports execution only till tier-2, tier-3 onwards will be part of system test
             if((!(tierLevel == "tier-0" && buildStatus == "fail")) &&
-               (!final_stage || (final_stage && tierLevel != "tier-2"))){
+               (!final_stage || (final_stage && tierNumber < 2))){
                 build ([
                     wait: false,
                     job: "rhceph-test-execution-pipeline",
@@ -370,7 +615,11 @@ node(nodeName) {
                                 string(name: 'buildArtifacts', value: buildArtifacts.toString())]
                 ])
             }
-            sharedLib.writeToRecipeFile(buildType, rhcephVersion, tierLevel, currentStageLevel, buildStatus)
+
+            if(tierLevel == "tier-0" && final_stage && buildStatus == "pass"){
+                sharedLib.writeToRecipeFile(rhcephVersion, tierLevel)
+            }
+
             latestContent = sharedLib.readFromRecipeFile(rhcephVersion)
             println "latest content is: ${latestContent}"
         }

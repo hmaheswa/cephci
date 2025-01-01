@@ -1,0 +1,31 @@
+{
+    "endpoints": {
+        "common": {"AUTH": "/api/auth", "CHECK_AUTH": "/api/auth/check"},
+        "rbd": {
+            "CREATE_POOL": "/api/pool",
+            "GET_POOL": "/api/pool/{pool_name}",
+            "LIST_POOL": "/api/pool",
+            "CREATE_IMAGE": "/api/block/image",
+            "GET_IMAGE": "/api/block/image/{image_spec}",
+            "LIST_IMAGE": "/api/block/image"
+        },
+        "nvmeof": {
+            "GATEWAY_INFO": "/api/nvmeof/gateway",
+            "CREATE_SUBSYSTEM": "/api/nvmeof/subsystem",
+            "GET_SUBSYSTEM": "/api/nvmeof/subsystem/{nqn}",
+            "LIST_SUBSYSTEM": "/api/nvmeof/subsystem",
+            "LIST_SUBSYSTEM_CONNECTIONS": "/api/nvmeof/subsystem/{nqn/connection",
+            "LIST_ALLOWED_HOSTS_SUBSYSTEM": "/api/nvmeof/subsystem/{nqn}/host",
+            "ALLOW_HOSTS_SUBSYSTEM": "/api/nvmeof/subsystem/{nqn}/host",
+            "LIST_ALL_SUBSYSTEM_LISTENER": "/api/nvmeof/subsystem/{nqn}/listener",
+            "ADD_SUBSYSTEM_LISTENER": "/api/nvmeof/subsystem/{nqn}/listener",
+            "DELETE_SUBSYSTEM_LISTENER": "/api/nvmeof/subsystem/{nqn}/listener/{host_name}/{traddr}",
+            "LIST_NAMESPACES_SUBSYSTEM": "/api/nvmeof/subsystem/{nqn}/namespace",
+            "CREATE_NAMESPACE_SUBSYSTEM": "/api/nvmeof/subsystem/{nqn}/namespace",
+            "GET_INFO_NAMESPACE_SUBSYSTEM": "/api/nvmeof/subsystem/{nqn}/namespace/{nsid}",
+            "DELETE_SUBSYSTEM": "/api/nvmeof/subsystem/{nqn}",
+            "DELETE_NAMESPACE": "/api/nvmeof/subsystem/{nqn}/namespace/{nsid}",
+            "SUBSYSTEM_CONNECTION_CHECK": "/api/nvmeof/subsystem/{nqn}/connection"
+        }
+    }
+}

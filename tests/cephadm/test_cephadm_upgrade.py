@@ -41,6 +41,7 @@ def run(ceph_cluster, **kwargs) -> int:
     log.info("Upgrade Ceph cluster...")
     config = kwargs["config"]
     config["overrides"] = kwargs.get("test_data", {}).get("custom-config")
+    verify_image = bool(config.get("verify_cluster_health", False))
     orch = Orch(cluster=ceph_cluster, **config)
 
     client = ceph_cluster.get_nodes(role="client")[0]
@@ -56,6 +57,10 @@ def run(ceph_cluster, **kwargs) -> int:
         if executor:
             executor.run(config=config["benchmark"])
 
+        # Remove existing repos
+        rm_repo_cmd = "find /etc/yum.repos.d/ -type f ! -name hashicorp.repo ! -name redhat.repo -delete"
+        for node in ceph_cluster.get_nodes():
+            node.exec_command(sudo=True, cmd=rm_repo_cmd)
         # Set repo to newer RPMs
         orch.set_tool_repo()
 
@@ -82,6 +87,11 @@ def run(ceph_cluster, **kwargs) -> int:
         # Monitor upgrade status, till completion
         orch.monitor_upgrade_status()
 
+        if verify_image:
+            # BZ: 2077843
+            if "docker.io" in orch.upgrade_status():
+                raise UpgradeFailure("docker.io appended to the image.")
+
         if config.get("verify_cephadm_containers") and is_legacy_container_present(
             ceph_cluster
         ):
@@ -98,6 +108,7 @@ def run(ceph_cluster, **kwargs) -> int:
                 rhbuild=config.get("rhbuild"), client=orch.installer
             ):
                 raise UpgradeFailure("Cluster is in HEALTH_ERR state")
+        ceph_cluster.rhcs_version = config.get("rhbuild")
     except BaseException as be:  # noqa
         log.error(be, exc_info=True)
         return 1

@@ -1,4 +1,5 @@
 """This module implements the required foundation data structures for testing."""
+
 import datetime
 import json
 import pickle
@@ -11,9 +12,9 @@ from time import sleep, time
 import paramiko
 import requests
 import yaml
-from paramiko.ssh_exception import SSHException
 
 from ceph.parallel import parallel
+from cli.ceph.ceph import Ceph as CephCli
 from utility import lvm_utils
 from utility.log import Log
 from utility.utils import custom_ceph_config
@@ -46,6 +47,7 @@ class Ceph(object):
         self.custom_config = None
         self.allow_custom_ansible_config = True
         self.__rhcs_version = None
+        self.ceph_nodename = None
         self.networks = dict()
 
     def __eq__(self, ceph_cluster):
@@ -297,9 +299,11 @@ class Ceph(object):
                     if "pool" in node.hostname:
                         logger.info(node.hostname)
                         devices = node.create_lvm(
-                            devices[0:1]
-                            if not device_to_add
-                            else device_to_add.split(),
+                            (
+                                devices[0:1]
+                                if not device_to_add
+                                else device_to_add.split()
+                            ),
                             num=random.randint(1, 10) if device_to_add else None,
                             check_lvm=False if device_to_add else True,
                         )
@@ -576,9 +580,8 @@ class Ceph(object):
             )
 
         out, err = client.exec_command(
-            "sudo ceph {role} metadata -f json-pretty".format(role=role)
+            cmd=f"ceph {role} metadata -f json-pretty", sudo=True
         )
-
         return json.loads(out)
 
     def get_osd_metadata(self, osd_id, client=None):
@@ -934,18 +937,19 @@ class Ceph(object):
     @staticmethod
     def generate_repository_file(base_url, repos, cloud_type="openstack"):
         """
-        Generate rhel repository file for given repos
+        Generate rhel repository file for given repos.
+
         Args:
             base_url(str): rhel compose url
             repos(list): repos behind compose/ to process
-
+            cloud_type (str): The environment used for testing
         Returns:
             str: repository file content
         """
         repo_file = ""
         for repo in repos:
             base_url = base_url.rstrip("/")
-            if cloud_type == "ibmc":
+            if "ibmc" in cloud_type:
                 repo_to_use = f"{base_url}/{repo}/"
             else:
                 repo_to_use = f"{base_url}/compose/{repo}/x86_64/os/"
@@ -961,6 +965,7 @@ class Ceph(object):
                 gpgcheck = "gpgcheck=0\n"
                 enabled = "enabled=1\n\n"
                 repo_file = repo_file + header + name + baseurl + gpgcheck + enabled
+
         return repo_file
 
     def get_osd_container_name_by_id(self, osd_id, client=None):
@@ -1095,9 +1100,93 @@ class Ceph(object):
         """Return the list of nodes found in the location."""
         return [node for node in self.node_list if node.vm_node.location == location]
 
+    def get_cluster_fsid(self, rhbuild, cluster_name=None, client=None):
+        """
+            Fetch the fsid of the cluster
+        Args:
+            rhbuild: rhbuild value for the ceph cluster
+            cluster_name: name of the cluster
+            client: client node
+
+        Returns:
+            Returns the fsid of the cluster
+        """
+        cmd = "ceph fsid"
+        pacific = True if (rhbuild and rhbuild.split(".")[0] >= "5") else False
+        if not client:
+            client = (
+                self.get_ceph_object("client")
+                if self.get_ceph_object("client")
+                else self.get_ceph_object("mon")
+            )
+        if cluster_name is not None:
+            cmd += f" --cluster {cluster_name}"
+        if pacific and not self.get_ceph_object("client"):
+            cmd = f"cephadm shell -- {cmd}"
+
+        out, _ = client.exec_command(cmd=cmd, sudo=True)
+        return out.strip()
+
+    def get_mgr_services(self):
+        """Fetch `mgr` services"""
+        # Set json format & get client node
+        args, node = {"format": "json"}, self.get_ceph_object("client")
+
+        # Check for mandatory client node
+        if not node:
+            raise ResourceNotFoundError("Client node not provided")
+
+        # Return json data
+        return json.loads(CephCli(node).mgr.services(**args)[0])
+
 
 class CommandFailed(Exception):
     pass
+
+
+class TimeoutException(Exception):
+    """Operation timeout exception."""
+
+    pass
+
+
+def check_timeout(end_time, timeout):
+    """Raises an exception when current time is greater"""
+    if timeout and datetime.datetime.now() >= end_time:
+        raise TimeoutException("Command exceed the allocated execution time.")
+
+
+def read_stream(channel, end_time, timeout, stderr=False, log=True):
+    """Reads the data from the given channel.
+
+    Args:
+      channel: the paramiko.Channel object to be used for reading.
+      end_time: maximum allocated time for reading from the channel.
+      timeout: Flag to check if timeout must be enforced.
+      stderr: read from the stderr stream. Default is False.
+      log: log the output. Default is True.
+
+    Returns:
+      a string with the data read from the channel.
+
+    Raises:
+      TimeoutException: if reading from the channel exceeds the allocated time.
+    """
+    _output = ""
+    _stream = channel.recv_stderr if stderr else channel.recv
+    _data = _stream(2048)
+
+    while _data:
+        _output += _data.decode("utf-8")
+        if log:
+            for _ln in _data.splitlines():
+                _log = logger.error if stderr else logger.debug
+                _log(_ln.decode("utf-8"))
+
+        check_timeout(end_time, timeout)
+        _data = _stream(2048)
+
+    return _output
 
 
 class RolesContainer(object):
@@ -1187,10 +1276,13 @@ class SSHConnectionManager(object):
         self.username = username
         self.password = password
         self.look_for_keys = look_for_keys
-        if look_for_keys:
-            self.pkey = paramiko.RSAKey.from_private_key_file(private_key_file_path)
+        self.pkey = (
+            paramiko.RSAKey.from_private_key_file(private_key_file_path)
+            if look_for_keys
+            else None
+        )
         self.__client = paramiko.SSHClient()
-        self.__client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.__client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
         self.__transport = None
         self.__outage_start_time = None
         self.outage_timeout = datetime.timedelta(seconds=outage_timeout)
@@ -1217,18 +1309,19 @@ class SSHConnectionManager(object):
                     password=self.password,
                     look_for_keys=self.look_for_keys,
                     allow_agent=False,
+                    pkey=self.pkey,
                 )
                 self.__outage_start_time = None
                 return
             except Exception as e:
-                logger.warning(f"Connection outage to {self.ip_address}: \n{e}")
+                logger.warning(f"Error in connecting to {self.ip_address}: \n{e}")
                 if not self.__outage_start_time:
                     self.__outage_start_time = datetime.datetime.now()
 
                 logger.debug("Retrying connection in 10 seconds")
                 sleep(10)
 
-        raise AssertionError(f"Unable to establish connection with {self.ip_address}")
+        raise AssertionError(f"Unable to establish a connection with {self.ip_address}")
 
     @property
     def transport(self):
@@ -1274,11 +1367,13 @@ class CephNode(object):
         self.ip_address = kw["ip_address"]
         self.subnet = kw["subnet"]
         self.vmname = kw["hostname"]
+        self.ceph_nodename = kw["ceph_nodename"]
         self.vmshortname = self.vmname.split(".")[0]
 
         if kw.get("ceph_vmnode"):
             self.vm_node = kw["ceph_vmnode"]
             self.osd_scenario = self.vm_node.osd_scenario
+        self.id = kw.get("id", None)
 
         self.volume_list = []
         if kw["no_of_volumes"]:
@@ -1381,21 +1476,25 @@ class CephNode(object):
             )
         )
 
-        stdin, stdout, stderr = self.rssh().exec_command("dmesg")
+        self.rssh().exec_command("dmesg")
         self.rssh_transport().set_keepalive(15)
-        changepwd = (
-            "echo " + "'" + self.username + ":" + self.password + "'" + "|" + "chpasswd"
+        _, stdout, stderr = self.rssh().exec_command(
+            f"echo '{self.username}:{self.password}' | chpasswd"
         )
-        logger.info("Running command %s", changepwd)
-        stdin, stdout, stderr = self.rssh().exec_command(changepwd)
+        logger.info(stdout.readlines())
+        _, stdout, stderr = self.rssh().exec_command(
+            f"echo 'root:{self.root_passwd}' | chpasswd"
+        )
         logger.info(stdout.readlines())
         self.rssh().exec_command("echo 120 > /proc/sys/net/ipv4/tcp_keepalive_time")
         self.rssh().exec_command("echo 60 > /proc/sys/net/ipv4/tcp_keepalive_intvl")
         self.rssh().exec_command("echo 20 > /proc/sys/net/ipv4/tcp_keepalive_probes")
         self.exec_command(cmd="ls / ; uptime ; date")
         self.ssh_transport().set_keepalive(15)
-
-        out, err = self.exec_command(cmd="hostname")
+        if self.vm_node.node_type == "baremetal":
+            out, err = self.exec_command(cmd="hostname -s")
+        else:
+            out, err = self.exec_command(cmd="hostname")
         self.hostname = out.strip()
 
         shortname = self.hostname.split(".")
@@ -1440,9 +1539,12 @@ class CephNode(object):
         )
         self.exec_command(cmd="ssh-keygen -b 2048 -f ~/.ssh/id_rsa -t rsa -q -N ''")
         self.id_rsa_pub, _ = self.exec_command(cmd="cat ~/.ssh/id_rsa.pub")
+        out, rc = self.exec_command(cmd="sudo hostname")
+        logger.info(out)
+        self.exec_command(cmd="sudo hostnamectl set-hostname $(hostname -s)")
 
     def long_running(self, **kw):
-        """Method to execute long running command.
+        """Method to execute long-running command.
 
         Args:
             **kw: execute command configuration
@@ -1450,106 +1552,149 @@ class CephNode(object):
         Returns:
             ec: exit status
         """
-        ssh = self.rssh if kw.get("sudo") else self.ssh
         cmd = kw["cmd"]
-        timeout = kw.get("timeout", 3600)
-        logger.info(f"long running command on {self.ip_address} -- {cmd}")
+        _end_time = None
+        _verbose = kw.get("verbose", False)
+        ssh = self.rssh if kw.get("sudo") else self.ssh
+        long_running = kw.get("long_running", False)
+        if "timeout" in kw:
+            timeout = None if kw["timeout"] == "notimeout" else kw["timeout"]
+        else:
+            # Set defaults if long_running then 1h else 5m
+            timeout = 3600 if kw.get("long_running", False) else 300
 
         try:
-            channel = ssh().get_transport().open_session()
+            channel = ssh().get_transport().open_session(timeout=timeout)
             channel.settimeout(timeout)
 
-            # A mismatch between stdout and stderr streams have been observed hence
-            # combining the streams and logging is set to debug level only.
-            channel.set_combine_stderr(True)
+            logger.info(f"Execute {cmd} on {self.ip_address}")
+            _exec_start_time = datetime.datetime.now()
             channel.exec_command(cmd)
 
+            if timeout:
+                _end_time = datetime.datetime.now() + datetime.timedelta(
+                    seconds=timeout
+                )
+
+            _out = ""
+            _err = ""
             while not channel.exit_status_ready():
                 # Prevent high resource consumption
-                sleep(2)
+                sleep(1)
 
+                # Check the streams for data and log in debug mode only if it
+                # is a long running command else don't log.
+                # Fixme: logging must happen in debug irrespective of type.
+                _verbose = True if long_running else _verbose
                 if channel.recv_ready():
-                    data = channel.recv(1024)
-                    while data:
-                        for line in data.splitlines():
-                            logger.debug(line)
+                    _out += read_stream(channel, _end_time, timeout, log=_verbose)
 
-                        data = channel.recv(1024)
+                if channel.recv_stderr_ready():
+                    _err += read_stream(
+                        channel, _end_time, timeout, stderr=True, log=_verbose
+                    )
 
-            logger.info(f"Command completed on {datetime.datetime.now()}")
-            return channel.recv_exit_status()
+                check_timeout(_end_time, timeout)
+
+            _time = (datetime.datetime.now() - _exec_start_time).total_seconds()
+            logger.info(
+                f"Execution of {cmd} on {self.ip_address} took {_time} seconds."
+            )
+
+            # Check for data residues in the channel streams. This is required for the following reasons
+            #   - exit_ready and first line is blank causing data to be None
+            #   - race condition between data read and exit ready
+            try:
+                _new_timeout = datetime.datetime.now() + datetime.timedelta(seconds=10)
+                _out += read_stream(channel, _new_timeout, timeout=True)
+                _err += read_stream(channel, _new_timeout, timeout=True, stderr=True)
+            except CommandFailed:
+                logger.debug("Encountered a timeout during read post execution.")
+            except BaseException as be:
+                logger.debug(
+                    f"Encountered an unknown exception during last read.\n {be}"
+                )
+
+            _exit = channel.recv_exit_status()
+            return _out, _err, _exit, _time
         except socket.timeout as terr:
-            logger.error(f"Command failed to execute within {timeout} seconds.")
+            logger.error(f"{cmd} failed to execute within {timeout} seconds.")
             raise SocketTimeoutException(terr)
+        except TimeoutException as tex:
+            channel.close()
+            logger.error(f"{cmd} failed to execute within {timeout}s.")
+            raise CommandFailed(tex)
         except BaseException as be:  # noqa
             logger.exception(be)
             raise CommandFailed(be)
 
     def exec_command(self, **kw):
-        """execute a command on the vm.
+        """Execute the given command on the remote host.
 
-        Attributes:
-            kw (Dict): execute command configuration
-            check_ec: False will run the command and not wait for exit code
+        Args:
+          cmd: The command that needs to be executed on the remote host.
+          long_running: Bool flag to indicate if the command is long running.
+          check_ec: Bool flag to indicate if the command should check for error code.
+          timeout: Max time to wait for command to complete. Default is 600 seconds.
+          pretty_print: Bool flag to indicate if the output should be pretty printed.
+          verbose: Bool flag to indicate if the command output should be printed.
 
-        Example::
+        Returns:
+          Exit code when long_running is used
+          Tuple having stdout, stderr data output when long_running is not used
+          Tupe having stdout, stderr, exit code, duration when verbose is enabled
 
-            eg: self.exec_cmd(cmd='uptime')
-            or
+        Raises:
+          CommandFailed: when the exit code is non-zero and check_ec is enabled.
+          TimeoutError: when the command times out.
+
+        Examples:
+            self.exec_cmd(cmd='uptime')
+          or
             self.exec_cmd(cmd='background_cmd', check_ec=False)
-
-            kw:
-                check_ec: False will run the command and not wait for exit code
         """
-        if kw.get("long_running"):
-            return self.long_running(**kw)
-
-        timeout = kw["timeout"] if kw.get("timeout") else 600
-        ssh = self.rssh() if kw.get("sudo") else self.ssh()
-
-        logger.info(
-            f"Running command {kw['cmd']} on {self.ip_address} timeout {timeout}"
-        )
-
         if self.run_once:
             self.ssh_transport().set_keepalive(15)
             self.rssh_transport().set_keepalive(15)
 
-        stdout = str()
-        stderr = str()
-        _stdout = None
-        _stderr = None
-        try:
-            _, _stdout, _stderr = ssh.exec_command(kw["cmd"], timeout=timeout)
-            for line in _stdout:
-                if line:
-                    stdout += line
-            for line in _stderr:
-                if line:
-                    stderr += line
-        except socket.timeout as sock_err:
-            logger.error("socket.timeout doesn't give an error message")
-            ssh.close()
-            raise SocketTimeoutException(sock_err)
-        except SSHException as e:
-            logger.error("SSHException during cmd: %s", str(e))
+        cmd = kw["cmd"]
+        _out, _err, _exit, _time = self.long_running(**kw)
+        self.exit_status = _exit
 
-        exit_status = None
-        if _stdout is not None:
-            exit_status = _stdout.channel.recv_exit_status()
+        if kw.get("pretty_print"):
+            msg = f"\nCommand:    {cmd}"
+            msg += f"\nDuration:   {_time} seconds"
+            msg += f"\nExit Code:  {_exit}"
 
-        self.exit_status = exit_status
-        if kw.get("check_ec", True):
-            if exit_status == 0:
-                logger.info("Command completed successfully")
-            else:
-                logger.error(f"Error {exit_status} during cmd, timeout {timeout}")
-                logger.error(stderr)
+            if _out:
+                msg += f"\nStdout:     {_out}"
+
+            if _err:
+                msg += f"\nStderr:      {_err}"
+
+            logger.info(msg)
+
+        if "verbose" in kw:
+            return _out, _err, _exit, _time
+
+        # Historically, we are only providing command exit code for long
+        # running commands.
+        # Fixme: Ensure the method returns a tuple of
+        #        (stdout, stderr, exit_code, time_taken)
+        if kw.get("long_running", False):
+            if kw.get("check_ec", False) and _exit != 0:
                 raise CommandFailed(
-                    f"{kw['cmd']} Error:  {str(stderr)} {str(self.ip_address)}"
+                    f"{cmd} returned {_err} and code {_exit} on {self.ip_address}"
                 )
 
-        return stdout, stderr
+            return _exit
+
+        if kw.get("check_ec", True) and _exit != 0:
+            raise CommandFailed(
+                f"{cmd} returned {_err} and code {_exit} on {self.ip_address}"
+            )
+
+        return _out, _err
 
     def remote_file(self, **kw):
         """Return contents of the remote file."""
@@ -1840,7 +1985,7 @@ class CephNode(object):
             "https://www.redhat.com/security/897da07a.txt",
             "https://www.redhat.com/security/f21541eb.txt",
             "https://prodsec.redhat.com/keys/00da75f2.txt",
-            "http://file.rdu.redhat.com/~kdreyer/keys/00da75f2.txt",
+            "http://file.corp.redhat.com/~kdreyer/keys/00da75f2.txt",
             "https://www.redhat.com/security/data/fd431d51.txt",
         ]
 
@@ -1856,13 +2001,18 @@ class CephNode(object):
             base_url (str): compose url for rhel
             installer_url (str): installer repos url
         """
-        repos = ["MON", "OSD", "Tools", "Calamari", "Installer"]
-        base_repo = Ceph.generate_repository_file(base_url, repos, cloud_type)
-        base_file = self.remote_file(
-            sudo=True, file_name="/etc/yum.repos.d/rh_ceph.repo", file_mode="w"
-        )
-        base_file.write(base_repo)
-        base_file.flush()
+        if base_url.endswith(".repo"):
+            cmd = f"yum-config-manager --add-repo {base_url}"
+            self.exec_command(sudo=True, cmd=cmd)
+
+        else:
+            repos = ["MON", "OSD", "Tools", "Calamari", "Installer"]
+            base_repo = Ceph.generate_repository_file(base_url, repos, cloud_type)
+            base_file = self.remote_file(
+                sudo=True, file_name="/etc/yum.repos.d/rh_ceph.repo", file_mode="w"
+            )
+            base_file.write(base_repo)
+            base_file.flush()
 
         if installer_url is not None:
             installer_repos = ["Agent", "Main", "Installer"]
@@ -2019,6 +2169,89 @@ class CephNode(object):
         fileObject.close()
         return osd_scenarios
 
+    def get_dir_list(self, dir_path, sudo=False):
+        """Lists directories from node
+
+        Args:
+            dir_path (str): Directory path to get direcotry list
+            sudo (bool): Use root access
+        """
+        client = self.rssh if sudo else self.ssh
+        try:
+            return client().open_sftp().listdir(dir_path)
+        except FileNotFoundError:
+            logger.info(f"Dir path '{dir_path}' not present")
+            return None
+        except Exception as e:
+            raise e
+
+    def get_listdir_attr(self, dir_path, sudo=False):
+        """Lists directory attributes from node
+
+        Args:
+            dir_path (str): Directory path to get direcotry attributes
+            sudo (bool): Use root access
+        """
+        client = self.rssh if sudo else self.ssh
+        try:
+            return client().open_sftp().listdir_attr(dir_path)
+        except FileNotFoundError:
+            logger.info(f"Dir path '{dir_path}' not present")
+            return None
+        except Exception as e:
+            raise e
+
+    def upload_file(self, src, dst, sudo=False):
+        """Put file to remote location
+
+        Args:
+            src (str): Source file location
+            dst (str): File destination location
+            sudo (bool): Use root access
+        """
+        client = self.rssh if sudo else self.ssh
+        client().open_sftp().put(src, dst)
+
+    def download_file(self, src, dst, sudo=False):
+        """Get file from remote location
+
+        Args:
+            src (str): Source file remote location
+            dst (str): File destination location
+            sudo (bool): Use root access
+        """
+        client = self.rssh if sudo else self.ssh
+        client().open_sftp().get(src, dst)
+
+    def create_dirs(self, dir_path, sudo=False):
+        """Create directory on node
+        Args:
+            dir_path (str): Directory path to create
+            sudo (bool): Use root access
+        """
+        client = self.rssh if sudo else self.ssh
+        try:
+            client().open_sftp().mkdir(dir_path)
+        except Exception:
+            # Error happens when the directory already exists
+            logger.info("mkdir failed, retrying with -p param")
+            cmd = f"mkdir -p {dir_path}"
+            self.exec_command(cmd=cmd, sudo=True)
+
+    def remove_file(self, file_path, sudo=False):
+        """Remove file from node
+        Args:
+            file_path (str): file path to delete
+            sudo (bool): use root access
+        """
+        client = self.rssh if sudo else self.ssh
+        try:
+            client().open_sftp().remove(file_path)
+        except Exception:
+            logger.info("rm failed, retrying with -rvf param")
+            cmd = f"rm -rvf {file_path}"
+            self.exec_command(cmd=cmd, sudo=True)
+
 
 class CephObject(object):
     def __init__(self, role, node):
@@ -2051,6 +2284,18 @@ class CephObject(object):
         """
         return self.node.exec_command(cmd=cmd, **kw)
 
+    def create_dirs(self, dir_path, sudo=False):
+        """
+        Proxy to node's create_dirs
+        Args:
+            dir_path (str): Directory path to create
+            sudo (bool): Use root access
+
+        Returns:
+            node's create_dirs result
+        """
+        return self.node.create_dirs(dir_path=dir_path, sudo=sudo)
+
     def remote_file(self, **kw):
         """
         Proxy to node's write file
@@ -2061,6 +2306,39 @@ class CephObject(object):
             node's remote_file result
         """
         return self.node.remote_file(**kw)
+
+    def get_dir_list(self, dir_path, sudo=False):
+        """
+        Proxy to get directory files list
+
+        Args:
+            dir_path (str): Directory path to get direcotry list
+            sudo (bool): Use root access
+
+        """
+        self.node.get_dir_list(dir_path=dir_path, sudo=sudo)
+
+    def upload_file(self, src, dst, sudo=False):
+        """
+        Proxy to upload file to remote location
+
+        Args:
+            src (str): Source file location
+            dst (str): File destination location
+            sudo (bool): Use root access
+        """
+        self.node.upload_file(src=src, dst=dst, sudo=sudo)
+
+    def download_file(self, src, dst, sudo=False):
+        """
+        Proxy to download file from remote location
+
+        Args:
+            src (str): Source file location
+            dst (str): File destination location
+            sudo (bool): Use root access
+        """
+        self.node.download_file(src=src, dst=dst, sudo=sudo)
 
 
 class CephDemon(CephObject):
@@ -2264,6 +2542,43 @@ class CephInstaller(CephObject):
         host_file = self.remote_file(
             sudo=True,
             file_mode="w",
+            file_name="{ansible_dir}/{inventory_file}".format(
+                ansible_dir=self.ansible_dir, inventory_file=file_name
+            ),
+        )
+        host_file.write(out)
+        host_file.flush()
+
+    def append_inventory_file(self, inventory_config, file_name="hosts"):
+        """
+        Append inventory to hosts file for ansible use. Existing file will be appended
+        Args:
+            inventory_config(str):inventory config compatible with ceph-ansible
+            file_name(str): custom inventory file name. (default : "hosts")
+        """
+        host_file = self.remote_file(
+            sudo=True,
+            file_mode="a",
+            file_name="{ansible_dir}/{inventory_file}".format(
+                ansible_dir=self.ansible_dir, inventory_file=file_name
+            ),
+        )
+        logger.info(inventory_config)
+        host_file.write(inventory_config)
+        host_file.flush()
+
+        out, rc = self.exec_command(
+            sudo=True,
+            cmd="cat {ansible_dir}/{inventory_file}".format(
+                ansible_dir=self.ansible_dir, inventory_file=file_name
+            ),
+        )
+        out = out.rstrip("\n")
+        out = re.sub(r"\]+", "]", out)
+        out = re.sub(r"\[+", "[", out)
+        host_file = self.remote_file(
+            sudo=True,
+            file_mode="a",
             file_name="{ansible_dir}/{inventory_file}".format(
                 ansible_dir=self.ansible_dir, inventory_file=file_name
             ),

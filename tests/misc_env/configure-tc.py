@@ -1,4 +1,5 @@
 """This module helps configure network delays using linux tc."""
+
 from typing import Dict, Optional, Tuple
 
 from ceph.ceph import Ceph, CephNode
@@ -25,7 +26,9 @@ def exec_command(
 def get_network_device(node: CephNode) -> str:
     """Return the interface configured for default route."""
     out, _ = exec_command(
-        node=node, sudo=True, command="ip route show | awk '/default/ { print $5 }'"
+        node=node,
+        sudo=True,
+        command="ip route show | awk '/default/ { print $5 }' | uniq",
     )
     return out.strip()
 
@@ -86,6 +89,18 @@ def run(ceph_cluster: Ceph, config: Dict, **kwargs) -> int:
 
         verb = "change" if config.get("modify", False) else "add"
         rule = config["rule"]
+
+        try:
+            exec_command(
+                node=node,
+                command=f"sudo tc qdisc show dev {dev} | grep netem",
+            )
+            LOG.info("delay already exist, change the existing delay")
+            verb = "change"
+
+        except Exception:  # no-qa
+            LOG.info("Introduce network delay")
+            verb = "add"
 
         try:
             exec_command(

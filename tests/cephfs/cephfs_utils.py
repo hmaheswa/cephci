@@ -3,6 +3,7 @@ import random
 import re
 import string
 import time
+from distutils.version import LooseVersion
 
 from ceph.ceph import CommandFailed
 from utility.log import Log
@@ -40,7 +41,7 @@ class FsUtils(object):
             for package in packages:
                 client.exec_command(
                     sudo=True,
-                    cmd="yum install -y {package}".format(package=package),
+                    cmd="yum install -y {package} --nogpgcheck".format(package=package),
                     long_running=True,
                     check_ec=False,
                 )
@@ -83,7 +84,7 @@ class FsUtils(object):
                 + self.mon_node_ip[-1].strip("/0")
             )
             self.mon_node_ip = self.mon_node_ip.split(" ")
-            if build.startswith("4") or build.startswith("5"):
+            if LooseVersion(build) > LooseVersion("3"):
                 self.mon_node_ip[0] = re.search(
                     r"\W+v\w+:(\d+.\d+.\d+.\d+:\d+)/0,v\w+:(\d+.\d+.\d+.\d+:\d+)/0\W",
                     self.mon_node_ip[0],
@@ -874,7 +875,6 @@ class FsUtils(object):
     @staticmethod
     def file_locking(clients, mounting_dir):
         for client in clients:
-
             to_lock_file = """
 import fcntl
 import subprocess
@@ -976,13 +976,12 @@ finally:
                 )
                 return 0
 
-    def allow_dir_fragmentation(self, mds_nodes):
+    def allow_dir_fragmentation(self, mds_nodes, fs_name="cephfs"):
         log.info("Allowing directorty fragmenation for splitting and merging")
         for node in mds_nodes:
-            fs_info = self.get_fs_info(node)
             node.exec_command(
                 sudo=True,
-                cmd="ceph fs set %s allow_dirfrags 1" % fs_info.get("fs_name"),
+                cmd=f"ceph fs set {fs_name} allow_dirfrags 1",
             )
             break
         return 0
@@ -1203,7 +1202,8 @@ finally:
                             ops = ["create", "setxattr", "getxattr", "chmod", "rename"]
                             client.exec_command(
                                 sudo=True,
-                                cmd="python3 smallfile/smallfile_cli.py "
+                                cmd="python3 /home/cephuser/smallfile/"
+                                "smallfile_cli.py "
                                 "--operation %s --threads 10 "
                                 "--file-size 4 --files 1000 "
                                 "--files-per-dir 10 --dirs-per-dir 2"
@@ -1533,7 +1533,6 @@ os.system('sudo systemctl start  network')
                 )
 
     def standby_rank(self, mds_nodes, mon_nodes, **kwargs):
-
         host_names = []
         for mds in mds_nodes:
             host_names.append(mds.node.hostname)
@@ -2164,19 +2163,20 @@ mds standby for rank = 1
 
     @staticmethod
     def manual_evict(active_mds_node, rank):
-        grep_cmd = """ sudo ceph tell mds.%d client ls | grep '"id":'"""
-        out, rc = active_mds_node.exec_command(cmd=grep_cmd % rank)
+        grep_cmd = f""" sudo ceph tell mds.{rank} client ls | grep '"id":'"""
+        out, rc = active_mds_node.exec_command(cmd=grep_cmd)
         client_ids = re.findall(r"\d+", out)
-        grep_cmd = """ sudo ceph tell mds.%d client ls | grep '"inst":'"""
+        grep_cmd = f""" sudo ceph tell mds.{rank} client ls | grep '"inst":'"""
         log.info("Getting IP address of Evicted client")
-        out, rc = active_mds_node.exec_command(cmd=grep_cmd % rank)
+        out, rc = active_mds_node.exec_command(cmd=grep_cmd)
         op = re.findall(r"\d+.+\d+.", out)
         ip_add = op[0]
         ip_add = ip_add.split(" ")
         ip_add = ip_add[1].strip('",')
-        id_cmd = "sudo ceph tell mds.%d client evict id=%s"
         for client_id in client_ids:
-            active_mds_node.exec_command(cmd=id_cmd % (rank, client_id))
+            active_mds_node.exec_command(
+                cmd=f"sudo ceph tell mds.{rank} client evict id={client_id}"
+            )
             break
 
         return ip_add
@@ -2251,7 +2251,6 @@ mds standby for rank = 1
             return self.result_vals, 0
 
     def setfattr(self, clients, ops, val, mounting_dir, file_name):
-
         if ops == "max_bytes" or ops == "max_files":
             for client in clients:
                 rc = self.check_mount_exists(client)
@@ -2282,6 +2281,28 @@ mds standby for rank = 1
         return osd_count
 
     @staticmethod
+    def wait_until_umount_succeeds(client, mount_point, timeout=180, interval=5):
+        """
+        Checks for the mount point and returns the status based on mount command
+        :param client:
+        :param mount_point:
+        :param timeout:
+        :param interval:
+        :return: boolean
+        """
+        end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+        log.info("Wait for the mount to appear")
+        while end_time > datetime.datetime.now():
+            out, rc = client.exec_command(sudo=True, cmd="mount", check_ec=False)
+            mount_output = out.rstrip("\n").split()
+            log.info(mount_output)
+            log.info("Validate Un mount:")
+            if mount_point.rstrip("/") not in mount_output:
+                return True
+            time.sleep(interval)
+        return False
+
+    @staticmethod
     def client_clean_up(fuse_clients, kernel_clients, mounting_dir, *args, **kwargs):
         if kwargs:
             client_name = str()
@@ -2308,6 +2329,7 @@ mds standby for rank = 1
                         client.exec_command(
                             sudo=True, cmd="fusermount -u %s -z" % mounting_dir
                         )
+                        FsUtils.wait_until_umount_succeeds(client, mounting_dir)
                         log.info("Removing mounting directory:")
                         client.exec_command(sudo=True, cmd="rmdir %s" % mounting_dir)
                         log.info("Removing keyring file:")
@@ -2357,6 +2379,7 @@ mds standby for rank = 1
                             client.exec_command(
                                 sudo=True, cmd="umount %s -l" % mounting_dir
                             )
+                            FsUtils.wait_until_umount_succeeds(client, mounting_dir)
                             client.exec_command(
                                 sudo=True, cmd="rmdir %s" % mounting_dir
                             )

@@ -4,9 +4,9 @@ id: rhel
 instance:
   create:
     image-name: rhel-85-server-released
-    network_name: sn-01-cephqe-pvt-network
-    private_key: ibmc-shared
-    group_access: cephqe-sec-grp-all-access
+    network_name: sn-20240306-02
+    private_key: cephci-private-key
+    group_access: flick-outgoing-rejoicing-broadways
     profile: bx2-2x8
 
   setup:  |
@@ -32,9 +32,8 @@ instance:
 
     runcmd:
       - sed -i -e 's/^Defaults\s\+requiretty/# \0/' /etc/sudoers
-      - subscription-manager release --set=8.5
-      - curl -k -o /etc/pki/ca-trust/source/anchors/ceph-qe-ca.pem https://10.245.4.89/.ceph-qe-ca.pem
-      - curl -k -o /etc/pki/ca-trust/source/anchors/RH-IT-Root-CA.crt https://10.245.4.89/.RH-IT-Root-CA.crt
-      - update-ca-trust
+      - sed -i -e 's/#PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+      - systemctl restart sshd
       - echo "net.core.default_qdisc=netem" > /etc/sysctl.d/1000-qdisc.conf
+      - timedatectl set-timezone Etc/UTC
       - touch /ceph-qa-ready

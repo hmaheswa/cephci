@@ -1,3 +1,5 @@
+import groovy.json.JsonOutput
+
 // Pipeline script for uploading IBM test run results to report portal.
 def credsRpProc = [:]
 def sharedLib
@@ -9,11 +11,22 @@ def build_url
 def reportBucket = "qe-ci-reports"
 def remoteName= "ibm-cos"
 def msgMap = [:]
+def tags_list
+def umbLib
+def composeInfo
+def metaData = [:]
+def rp_base_link = "https://reportportal-rhcephqe.apps.ocp-c1.prod.psi.redhat.com"
+def launch_id = ""
+def testStatus
+def date
+def rhcsVersion
+def majorVersion
+def minorVersion
+def failureReason
 
-node("rhel-8-medium || ceph-qe-ci") {
+node("rhel-9-medium") {
 
     try {
-
         stage('prepareJenkinsAgent') {
             if (env.WORKSPACE) { sh script: "sudo rm -rf * .venv" }
             checkout(
@@ -43,46 +56,27 @@ node("rhel-8-medium || ceph-qe-ci") {
 
             // prepare the node
             sharedLib = load("${env.WORKSPACE}/pipeline/vars/v3.groovy")
+            sharedLib.prepareNode(3)
+
             msgMap = sharedLib.getCIMessageMap()
             println("msgMap : ${msgMap}")
             println("sharedLib: ${sharedLib}")
-            sharedLib.prepareNode(3)
+
+            emailLib = load("${env.WORKSPACE}/pipeline/vars/email.groovy")
+            println("emailLib : ${emailLib}")
+            reportLib = load("${env.WORKSPACE}/pipeline/vars/upload_results.groovy")
+            println("reportLib : ${reportLib}")
+            testStatus = msgMap["test"]["result"]
+            date = sh(returnStdout: true, script: "date")
+            rhcsVersion = sharedLib.getRHCSVersionFromArtifactsNvr()
+            currentBuild.result = "SUCCESS"
         }
 
-        stage('configureReportPortalWorkDir') {
-            (rpPreprocDir, credsRpProc) = sharedLib.configureRpPreProc()
-        }
-
-        stage('uploadTestResult') {
-            msgMap = sharedLib.getCIMessageMap()
-            def composeInfo = msgMap["recipe"]
-
-            def resultDir = msgMap["test"]["object-prefix"]
-            println("Test results are available at ${resultDir}")
-
-            def tmpDir = sh(returnStdout: true, script: "mktemp -d").trim()
-            sh script: "rclone sync ${remoteName}://${reportBucket} ${tmpDir} --progress --create-empty-src-dirs"
-
-            def metaData = readYaml file: "${tmpDir}/${resultDir}/metadata.yaml"
-            def copyFiles = "cp -a ${tmpDir}/${resultDir}/results ${rpPreprocDir}/payload/"
-            def copyAttachments = "cp -a ${tmpDir}/${resultDir}/attachments ${rpPreprocDir}/payload/"
-            def rmTmpDir = "rm -rf ${tmpDir}"
-
-            // Modifications to reuse methods
-            metaData["ceph_version"] = metaData["ceph-version"]
-            if ( metaData["stage"] == "latest" ) { metaData["stage"] = "Tier-0" }
-
-            sh script: "${copyFiles} && ${copyAttachments} && ${rmTmpDir}"
-
-            if ( composeInfo ){
-                metaData["buildArtifacts"] = composeInfo
-            }
-
-            def testStatus = "ABORTED"
-            /* Publish results through E-mail and Google Chat */
+        stage('updatePipelineMetadata'){
+            println("Stage updatePipelineMetadata")
             if ( msgMap["pipeline"].containsKey("tags") ) {
                 def tag = msgMap["pipeline"]["tags"]
-                def tags_list = tag.split(',') as List
+                tags_list = tag.split(',') as List
                 def stage_index = tags_list.findIndexOf { it ==~ /stage-\w+/ }
                 stageLevel = tags_list.get(stage_index)
                 def tier_index = tags_list.findIndexOf { it ==~ /tier-\w+/ }
@@ -90,102 +84,264 @@ node("rhel-8-medium || ceph-qe-ci") {
                 run_type = msgMap["pipeline"]["run_type"]
                 build_url = msgMap["run"]["url"]
             }
+        }
 
-            if (metaData["results"]) {
-                if ( ! msgMap["pipeline"].containsKey("tags") ) {
-                    sharedLib.sendEmail(
-                        metaData["results"], metaData, metaData["stage"]
-                    )
-                }
-                sharedLib.uploadTestResults(rpPreprocDir, credsRpProc, metaData)
-
-            }
-            testStatus = msgMap["test"]["result"]
-
-            // Remove the sync results folder
-            sh script: "rclone purge ${remoteName}:${reportBucket}/${resultDir}"
-
-            // Update RH recipe file
-            if ( composeInfo != null ) {
-                if ( run_type == "Sanity Run") {
-                    if ( tierLevel == null ) {
-                        tierLevel = msgMap["pipeline"]["name"]
-                    }
-                    def rhcsVersion = sharedLib.getRHCSVersionFromArtifactsNvr()
-                    majorVersion = rhcsVersion["major_version"]
-                    minorVersion = rhcsVersion["minor_version"]
-                    minorVersion = "${minorVersion}"
-
-                    def latestContent = sharedLib.readFromReleaseFile(
-                        majorVersion, minorVersion
-                    )
-                    println("latestContentBefore: ${latestContent}")
-
-                    if ( latestContent.containsKey(tierLevel) ) {
-                        latestContent[tierLevel] = composeInfo
-                    }
-                    else {
-                        def updateContent = ["${tierLevel}": composeInfo]
-                        latestContent += updateContent
-                    }
-                    println("latestContent: ${latestContent}")
-                    sharedLib.writeToReleaseFile(
-                        majorVersion, minorVersion, latestContent
-                    )
-                }
-                sharedLib.writeToResultsFile(
-                    msgMap["artifact"]["version"],
-                    tierLevel,
-                    stageLevel,
-                    testStatus,
-                    run_type,
-                    build_url
-                )
-            }
-            if (msgMap["pipeline"]["final_stage"] && tierLevel == "tier-2") {
-                def rhcsVersion = sharedLib.getRHCSVersionFromArtifactsNvr()
+        if (testStatus == 'ABORTED' && msgMap["pipeline"]["final_stage"]) {
+            stage('sendConsolidatedReport'){
                 majorVersion = rhcsVersion["major_version"]
                 minorVersion = rhcsVersion["minor_version"]
-                minorVersion = "${minorVersion}"
 
                 def testResults = sharedLib.readFromResultsFile(
                     msgMap["artifact"]["version"]
                 )
-                sharedLib.updateConfluencePage(
-                    majorVersion,
-                    minorVersion,
-                    msgMap["artifact"]["version"],
-                    run_type,
-                    testResults
+
+                def recipeMap = sharedLib.readFromReleaseFile(
+                    majorVersion, minorVersion, lockFlag=false
                 )
-                sharedLib.sendConsolidatedEmail(
+                println("recipeMap ---- ${recipeMap}")
+                metaData = recipeMap['tier-0']
+                metaData["product"] = "Red Hat Ceph Storage"
+                metaData["version"] = "RHCEPH-${majorVersion}.${minorVersion}"
+                metaData["date"] = date
+                metaData["ceph_version"] = msgMap["artifact"]["version"]
+                metaData["buildArtifacts"] = msgMap["recipe"]
+                metaData["log"] = env.RUN_DISPLAY_URL
+                metaData["stage"] = tierLevel
+                metaData["results"] = testResults
+
+                emailLib.sendConsolidatedEmail(
                     run_type,
-                    testResults,
                     metaData,
                     majorVersion,
                     minorVersion,
                     msgMap["artifact"]["version"]
                 )
-                sharedLib.sendGChatNotification(
-                    run_type, metaData["results"], tierLevel, stageLevel, build_url
-                )
-
-                // Remove the release file as it wouldn't be required
             }
-            println("Execution complete")
+        }
+        else
+        {
+            stage('configureReportPortalWorkDir') {
+                println("Stage configureReportPortalWorkDir")
+                (rpPreprocDir, credsRpProc) = reportLib.configureRpPreProc(sharedLib)
+            }
+
+            stage('uploadTestResultToReportPortal'){
+                println("Stage uploadTestResultToReportPortal")
+                composeInfo = msgMap["recipe"]
+
+                def resultDir = msgMap["test"]["object-prefix"]
+                println("Test results are available at ${resultDir}")
+
+                def tmpDir = sh(returnStdout: true, script: "mktemp -d").trim()
+                tags_list = msgMap["pipeline"]["tags"].split(',') as List
+                if ('ibmc' in tags_list) {
+                    sh script: "rclone sync ${remoteName}://${reportBucket} ${tmpDir} --progress --create-empty-src-dirs"
+                } else {
+                    sh "sudo cp -r /ceph/cephci-jenkins/${resultDir} ${tmpDir}"
+                }
+
+                metaData = readYaml file: "${tmpDir}/${resultDir}/metadata.yaml"
+                println("metadata: ${metaData}")
+                def copyFiles = "sudo cp -a ${tmpDir}/${resultDir}/results ${rpPreprocDir}/payload/"
+                def copyAttachments = "sudo cp -a ${tmpDir}/${resultDir}/attachments ${rpPreprocDir}/payload/"
+                def rmTmpDir = "sudo rm -rf ${tmpDir}"
+
+                // Modifications to reuse methods
+                metaData["ceph_version"] = metaData["ceph-version"]
+                if ( metaData["stage"] == "latest" ) { metaData["stage"] = "Tier-0" }
+
+                sh script: "${copyFiles} && ${copyAttachments} && ${rmTmpDir}"
+
+                if ( composeInfo ){
+                    metaData["buildArtifacts"] = composeInfo
+                }
+
+                if (metaData["results"]) {
+                    launch_id = reportLib.uploadTestResults(rpPreprocDir, credsRpProc, metaData, stageLevel, run_type)
+                    println("launch_id: ${launch_id}")
+                    if (launch_id) {
+                        metaData["rp_link"] = "${rp_base_link}/ui/#cephci/launches/all/${launch_id}"
+                    }
+                }
+
+                // Remove the sync results folder
+                if ('ibmc' in tags_list) {
+                    sh script: "rclone purge ${remoteName}:${reportBucket}/${resultDir}"
+                } else {
+                    sh "sudo rm -r /ceph/cephci-jenkins/${resultDir}"
+                }
+            }
+
+            stage('updateResultsFile'){
+                println("Stage updateResultsFile")
+                if (composeInfo != null){
+                    println("Fetching rp_launch_details")
+                    def rp_launch_details = [:]
+                    if (launch_id){
+                        sh "sleep 60"
+                        rp_launch_details = reportLib.fetchTestItemIdForLaunch(
+                            launch_id,
+                            rp_base_link,
+                            rpPreprocDir,
+                            credsRpProc,
+                            metaData,
+                            stageLevel,
+                            run_type
+                        )
+                    }
+                    reportLib.writeToResultsFile(
+                        msgMap["artifact"]["version"],
+                        run_type,
+                        tierLevel,
+                        stageLevel,
+                        metaData['results'],
+                        msgMap['run']['url'],
+                        metaData['rp_link'],
+                        rp_launch_details
+                    )
+                }
+            }
+
+            stage('getAndMergeReportPortalLaunches'){
+                println("Stage getAndMergeReportPortalLaunches")
+                launches = reportLib.getRPLaunches(rpPreprocDir, credsRpProc, metaData, run_type)
+                println("Launches : ${launches}")
+
+                def launchFile = "${rpPreprocDir}/launches.json"
+                launch_json = [
+                    "launch": launches,
+                ]
+                def json = JsonOutput.toJson(launch_json)
+                json = JsonOutput.prettyPrint(json)
+                writeJSON file: launchFile, json: json
+                merged_launch = reportLib.mergeRPLaunches(rpPreprocDir, credsRpProc, metaData, launchFile, run_type)
+                println("Merged_launch : ${merged_launch}")
+                merged_rplink = "${rp_base_link}/ui/#cephci/launches/all/${merged_launch}"
+                println("Merged report portal link : ${merged_rplink}")
+                reportLib.updateResultsFile(rpPreprocDir, msgMap["artifact"]["version"], run_type, merged_rplink)
+            }
+
+            stage('notifyTier-0Failure'){
+                println("Stage notifyTier-0Failure")
+                if (msgMap["test"]["result"] == "FAILURE" && tierLevel == "tier-0") {
+                    metaData.put("version", msgMap["artifact"]["nvr"])
+                    println("version")
+                    println(msgMap["artifact"]["nvr"])
+                    emailLib.sendEmail(
+                        sharedLib,
+                        run_type,
+                        metaData['results'],
+                        metaData,
+                        tierLevel,
+                        stageLevel,
+                        msgMap["artifact"]["nvr"]
+                    )
+
+                    emailLib.sendGChatNotification(
+                        sharedLib, run_type, metaData["results"], tierLevel, stageLevel, build_url
+                    )
+                }
+            }
+
+            stage('updateRecipeFile'){
+                println("Stage updateRecipeFile")
+                if ( composeInfo != null ) {
+                    if (run_type.contains("Sanity Run")) {
+                        if ( tierLevel == null ) {
+                            tierLevel = msgMap["pipeline"]["name"]
+                        }
+                        majorVersion = rhcsVersion["major_version"]
+                        minorVersion = rhcsVersion["minor_version"]
+                        minorVersion = "${minorVersion}"
+
+                        def latestContent = sharedLib.readFromReleaseFile(
+                            majorVersion, minorVersion
+                        )
+                        println("latestContentBefore: ${latestContent}")
+
+                        if ( latestContent.containsKey(tierLevel) ) {
+                            latestContent[tierLevel] = composeInfo
+                        }
+                        else {
+                            def updateContent = ["${tierLevel}": composeInfo]
+                            latestContent += updateContent
+                        }
+                        println("latestContent: ${latestContent}")
+                        sharedLib.writeToReleaseFile(
+                            majorVersion, minorVersion, latestContent
+                        )
+                    }
+                }
+            }
+
+            stage('sendConsolidatedReport'){
+                println("Stage sendConsolidatedReport")
+                if (msgMap["pipeline"]["final_stage"] && tierLevel == "tier-2") {
+                    majorVersion = rhcsVersion["major_version"]
+                    minorVersion = rhcsVersion["minor_version"]
+                    minorVersion = "${minorVersion}"
+
+                    def testResults = sharedLib.readFromResultsFile(
+                        msgMap["artifact"]["version"]
+                    )
+
+                    reportLib.updateConfluencePage(
+                        sharedLib,
+                        majorVersion,
+                        minorVersion,
+                        msgMap["artifact"]["version"],
+                        run_type,
+                        testResults
+                    )
+                    emailLib.sendConsolidatedEmail(
+                        run_type,
+                        metaData,
+                        majorVersion,
+                        minorVersion,
+                        msgMap["artifact"]["version"]
+                    )
+                    sharedLib.sendGChatNotification(
+                        run_type, metaData["results"], tierLevel, stageLevel, build_url
+                    )
+                }
+            }
+
+            stage('sendUMBFortier0RC'){
+                // This stage is to send UMB message for OSP interop team
+                // everytime an RC build passes sanity tier-0
+                println("Stage sendUMBFortier0RC")
+                majorVersion = rhcsVersion["major_version"]
+                minorVersion = rhcsVersion["minor_version"]
+                if (
+                    tags_list.contains("rc") && tierLevel == "tier-0"
+                    && msgMap.containsKey("pipeline") && msgMap["pipeline"]["final_stage"]
+                    && msgMap.containsKey("test") && msgMap["test"]["result"] == "SUCCESS"
+                ){
+                    minorVersion = "${minorVersion}"
+                    def recipeMap = sharedLib.readFromReleaseFile(
+                        majorVersion, minorVersion, lockFlag=false
+                    )
+                    umbLib = load("${env.WORKSPACE}/pipeline/vars/umb.groovy")
+                    umbLib.postUMBTestQueue(msgMap["artifact"]["nvr"], recipeMap, "false")
+                }
+            }
         }
     } catch(Exception err) {
-        if (currentBuild.result == "ABORTED") {
-            println("The workflow has been aborted.")
+        if (currentBuild.result != "ABORTED") {
+            currentBuild.result = "FAILURE"
         }
-
         // notify about failure
-        currentBuild.result = "FAILURE"
-        def failureReason = err.getMessage()
-        def subject =  "[CEPHCI-PIPELINE-ALERT] [JOB-FAILURE] - ${env.JOB_NAME}/${env.BUILD_NUMBER}"
-        def body = "<body><h3><u>Job Failure</u></h3></p>"
-        body += "<dl><dt>Jenkins Build:</dt><dd>${env.BUILD_URL}</dd>"
-        body += "<dt>Failure Reason:</dt><dd>${failureReason}</dd></dl></body>"
+        failureReason = err.getMessage()
+        def body = "<body><h3><u>Job ${currentBuild.result}</u></h3></p>"
+        body += "<dl><dt>Job Discription:</dt><dd>${run_type} ${majorVersion}.${minorVersion} ${tierLevel} ${stageLevel}</dd>"
+        if (launch_id) {
+            body += "<dt>Report portal URL</dt><dd>${rp_base_link}/ui/#cephci/launches/all/${launch_id}</dd>"
+        }
+        body += "<dt>${currentBuild.result} Reason:</dt><dd>${failureReason}</dd>"
+        body += "<dt>${currentBuild.result} Snippet:</dt><dd>${sharedLib.returnSnippet()}</dd>"
+        body += "<dt>UMB Message:</dt><dd>${msgMap}</dd>"
+        body += "<dt>Jenkins Build:</dt><dd>${env.BUILD_URL}</dd></dl></body>"
+        def subject = "${run_type} RHCEPH-${majorVersion}.${minorVersion} ${tierLevel} Post Result - ${currentBuild.result}"
 
         emailext (
             mimeType: 'text/html',

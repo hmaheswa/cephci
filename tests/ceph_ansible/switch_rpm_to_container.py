@@ -1,4 +1,5 @@
 """switches non-containerized ceph daemon to containerized ceph daemon"""
+
 import yaml
 
 from utility.log import Log
@@ -31,7 +32,6 @@ def ceph_repository_type_cdn(ansible_dir, installer_node):
 
 
 def run(**kw):
-
     log.info("Running exec test")
     ceph_nodes = kw.get("ceph_nodes")
     config = kw.get("config")

@@ -3,6 +3,7 @@ import time
 import traceback
 
 from ceph.ceph_admin import CephAdmin
+from ceph.rados.core_workflows import RadosOrchestrator
 from utility.log import Log
 
 log = Log(__name__)
@@ -25,47 +26,133 @@ def run(ceph_cluster, **kw):
     log.info(run.__doc__)
     config = kw.get("config")
     cephadm = CephAdmin(cluster=ceph_cluster, **config)
-    all_alerts = get_alerts(cephadm)
-    alert_list = ["MON_DISK_BIG", "OSDMAP_FLAGS"]
-    if all_alerts["active_alerts"]:
+    rados_obj = RadosOrchestrator(node=cephadm)
+    try:
+        all_alerts = get_alerts(cephadm)
+        alert_list = ["MON_DISK_BIG", "OSDMAP_FLAGS"]
+        if all_alerts["active_alerts"]:
+            log.info(
+                f"There are health alerts generated on the cluster. Alerts : {all_alerts}"
+            )
+        else:
+            log.info("Cluster Health is ok. \n Generating a alert to verify feature")
+
+        # Scenario 1 : Verify the auto-unmute of alert after TTL
+        log.info("Scenario 1: Verify the auto-unmute of alert after TTL")
+        alert = alert_list[1]
+        if not verify_alert_with_ttl(node=cephadm, alert=alert, ttl=8, flag="noscrub"):
+            log.error(f"Scenario 1 for alert : {alert} has failed")
+            return 1
+        log.debug("Scenario 1 Pass")
+
+        # Scenario 2 : Verify the auto-unmute of alert if the health alert is generated again. ( without sticky )
         log.info(
-            f"There are health alerts generated on the cluster. Alerts : {all_alerts}"
+            "Scenario 2: Verify the auto-unmute of alert if the health alert is generated again."
         )
-    else:
-        log.info("Cluster Health is ok. \n Generating a alert to verify feature")
+        alert = alert_list[1]
+        if not verify_alert_unmute(node=cephadm, alert=alert):
+            log.error(f"Scenario 2 for alert : {alert} has failed")
+            return 1
+        log.debug("Scenario 2 Pass")
 
-    # Scenario 1 : Verify the auto-unmute of alert after TTL
-    log.info("Scenario 1: Verify the auto-unmute of alert after TTL")
-    alert = alert_list[1]
-    if not verify_alert_with_ttl(node=cephadm, alert=alert, ttl=8, flag="noscrub"):
-        log.error(f"Scenario 1 for alert : {alert} has failed")
-        return 1
+        # Scenario 3 : Verify the auto-unmute of alert if the health alert is generated again. ( with sticky )
+        log.info(
+            "Scenario 3: Verify the auto-unmute of alert if the health alert is generated again."
+        )
+        alert = alert_list[1]
+        if not verify_alert_unmute(node=cephadm, alert=alert, sticky=True):
+            log.error(f"Scenario 3 for alert : {alert} has failed")
+            return 1
+        log.debug("Scenario 3 Pass")
+        log.info(f"All the current alerts : {get_alerts(cephadm)}")
+        # Scenario 4 : Verify the unmute command with sticky
+        log.info("Scenario 4 : Verify the unmute command")
+        alert = alert_list[0]
+        if not verify_unmute_cli(node=cephadm, alert=alert, sticky=True):
+            log.error(f"Scenario 4 for alert : {alert} has failed")
+            return 1
+        log.debug("Scenario 4 Pass")
+        log.info("Scenario 5: incorrect syntax during mute alerts")
+        # Checking for any existing crashes on the cluster
+        pre_crashes = rados_obj.do_crash_ls()
+        if pre_crashes:
+            log.debug(
+                f"Crashes on the cluster before running the scenario: {pre_crashes}"
+            )
+            log.error(
+                f"Crashes already present on the cluster. No of crashes : {len(pre_crashes)}"
+            )
+        # Generating the alert on the cluster
+        alert = alert_list[1]
+        generate_health_alert(alert=alert, node=cephadm, flag="noscrub", clear=False)
+        time.sleep(10)
+        all_alerts = get_alerts(cephadm)
+        if (
+            alert not in all_alerts["active_alerts"]
+            and alert not in all_alerts["muted_alerts"]
+        ):
+            log.error(f"Alert : {alert} not generated on the cluster")
+            return 1
+        log.info(
+            f"The alert {alert} Generated on the cluster. Trying to mute it via wrong syntax"
+            f"Bug verified with the workflow : https://bugzilla.redhat.com/show_bug.cgi?id=2247232 "
+        )
 
-    # Scenario 2 : Verify the auto-unmute of alert if the health alert is generated again. ( without sticky )
-    log.info(
-        "Scenario 2: Verify the auto-unmute of alert if the health alert is generated again."
-    )
-    alert = alert_list[1]
-    if not verify_alert_unmute(node=cephadm, alert=alert):
-        log.error(f"Scenario 2 for alert : {alert} has failed")
-        return 1
+        err_cmds = [
+            f"ceph health mute 10 {alert}",
+            f"ceph health mute 10 {alert} 10m",
+            "ceph health mute 10m",
+        ]
+        try:
+            for cmd in err_cmds:
+                rados_obj.run_ceph_command(cmd=cmd, client_exec=True)
+        except Exception as err:
+            log.debug(
+                f"Exception expected. wrong command passed to the cluster. Err: {err}"
+            )
 
-    # Scenario 3 : Verify the auto-unmute of alert if the health alert is generated again. ( with sticky )
-    log.info(
-        "Scenario 3: Verify the auto-unmute of alert if the health alert is generated again."
-    )
-    alert = alert_list[1]
-    if not verify_alert_unmute(node=cephadm, alert=alert, sticky=True):
-        log.error(f"Scenario 3 for alert : {alert} has failed")
+        log.debug(
+            "Completed executing wrong syntax of mute health alerts. Checking for crashes"
+        )
+        crashes = rados_obj.do_crash_ls()
+        if crashes:
+            log.debug(f"Crashes on the cluster post running the scenario: {crashes}")
+            if len(crashes) > len(pre_crashes):
+                log.error(
+                    f"New Crashes already present on the cluster. No of crashes : {len(pre_crashes)}"
+                )
+                return 1
+            else:
+                log.info("no new crashes generated on the cluster. Pass")
+        log.info(
+            "No crashes seen on the cluster post executing mute commands with wrong syntax. Scenario Pass"
+        )
+        # Unsetting the flag set earlier
+        alert = alert_list[1]
+        generate_health_alert(alert=alert, node=cephadm, flag="noscrub", clear=True)
+        time.sleep(10)
+        all_alerts = get_alerts(cephadm)
+        if alert in all_alerts["active_alerts"] and alert in all_alerts["muted_alerts"]:
+            log.error(f"Alert : {alert} not cleared on the cluster")
+            return 1
+        log.info("Completed all the scenarios in mute health alert tests")
+    except Exception as e:
+        log.error(f"Failed with exception: {e.__doc__}")
+        log.exception(e)
         return 1
-
-    log.info(f"All the current alerts : {get_alerts(cephadm)}")
-    # Scenario 4 : Verify the unmute command with sticky
-    log.info("Scenario 4 : Verify the unmute command")
-    alert = alert_list[0]
-    if not verify_unmute_cli(node=cephadm, alert=alert, sticky=True):
-        log.error(f"Scenario 4 for alert : {alert} has failed")
-        return 1
+    finally:
+        log.info(
+            "\n \n ************** Execution of finally block begins here *************** \n \n"
+        )
+        # removal of rados pools
+        rados_obj.rados_pool_cleanup()
+        unmute_health_alert(alert=alert, node=cephadm)
+        # log cluster health
+        rados_obj.log_cluster_health()
+        # check for crashes after test execution
+        if rados_obj.check_crash_status():
+            log.error("Test failed due to crash at the end of test")
+            return 1
 
     log.info("All the scenarios have passed")
     return 0
@@ -150,11 +237,14 @@ def verify_alert_unmute(node: CephAdmin, alert: str, **kwargs) -> bool:
         # clearing the flags set
         generate_health_alert(alert=alert, node=node, flag="noscrub", clear=True)
         generate_health_alert(alert=alert, node=node, flag="nodeep-scrub", clear=True)
+        time.sleep(10)
+        all_alerts = get_alerts(node)
+        if alert in all_alerts["muted_alerts"] or alert in all_alerts["active_alerts"]:
+            log.error(
+                f"Raised alert could not be removed. alerts on cluster : {all_alerts}"
+            )
         log.info(f"Auto-unmute was verified for the alert : {alert}. Scenario pass")
         return True
-
-    log.error(f"the scenario not available for the alert : {alert}")
-    return True
 
 
 def verify_unmute_cli(node: CephAdmin, alert: str, **kwargs) -> bool:
@@ -305,8 +395,8 @@ def generate_health_alert(alert: str, node: CephAdmin, **kwargs) -> bool:
     Args:
         alert: name of the alert to be generated
         node: name of the installer node
-        clear: Bool value which specifies if the given alert should be cleared
         kwargs: any other params that need to be sent for a particular alert
+            clear: Bool value which specifies if the given alert should be cleared
 
     Returns: True -> pass, False -> failure
 

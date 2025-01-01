@@ -26,19 +26,21 @@ def run(**kw):
             for cluster in kw.get("ceph_cluster_dict").values()
         ]
         poolname = mirror1.random_string() + "_tier_1_rbd_mirror_pool"
-        mirror1.create_pool(poolname=poolname)
-        mirror2.create_pool(poolname=poolname)
 
         # Create image and enable snapshot mirroring"
         imagename_1 = mirror1.random_string() + "_tier_1_rbd_mirror_image"
         imagespec_1 = poolname + "/" + imagename_1
-        mirror1.create_image(imagespec=imagespec_1, size=config.get("imagesize"))
-        mirror1.config_mirror(mirror2, poolname=poolname, mode="image")
-        mirror1.enable_mirror_image(poolname, imagename_1, "snapshot")
-        mirror2.wait_for_status(poolname=poolname, images_pattern=1)
-        mirror1.benchwrite(imagespec=imagespec_1, io=config.get("io-total"))
-        mirror1.wait_for_status(imagespec=imagespec_1, state_pattern="up+stopped")
-        mirror2.wait_for_status(imagespec=imagespec_1, state_pattern="up+replaying")
+
+        mirror1.initial_mirror_config(
+            mirror2,
+            poolname=poolname,
+            imagename=imagename_1,
+            imagesize=config.get("imagesize", "1G"),
+            io_total=config.get("io-total", "1G"),
+            mode="image",
+            mirrormode="snapshot",
+            **kw,
+        )
 
         # Rename primary image and check on secondary
         mirror1.rename_primary_image(
@@ -51,10 +53,6 @@ def run(**kw):
         time.sleep(30)
         out2 = mirror2.exec_cmd(cmd=f"rbd info {poolname}/rename_image")
         log.info(out2)
-
-        # Cleans up the configuration
-        mirror1.delete_image(f"{poolname}/rename_image")
-        mirror1.clean_up(peercluster=mirror2, pools=[poolname])
         return 0
 
     except ValueError as ve:
@@ -65,3 +63,8 @@ def run(**kw):
     except Exception as e:
         log.exception(e)
         return 1
+
+    finally:
+        # Cleans up the configuration
+        mirror1.delete_image(f"{poolname}/rename_image")
+        mirror1.clean_up(peercluster=mirror2, pools=[poolname])

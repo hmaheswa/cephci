@@ -18,7 +18,15 @@ tests:
           ceph_stable_rh_storage: True
           fetch_directory: ~/fetch
           copy_admin_key: true
-          dashboard_enabled: False
+          dashboard_enabled: true
+          dashboard_admin_user: admin
+          dashboard_admin_password: p@ssw0rd
+          grafana_admin_user: admin
+          grafana_admin_password: p@ssw0rd
+          node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+          grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+          prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+          alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
           ceph_conf_overrides:
             global:
               osd_pool_default_pg_num: 64
@@ -140,7 +148,7 @@ tests:
       polarion-id: CEPH-11186
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_invalid_date.yaml
         timeout: 300
 
@@ -160,7 +168,7 @@ tests:
       polarion-id: CEPH-83575046
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_rgw_enable_lc_threads.yaml
         timeout: 300
 
@@ -173,4 +181,14 @@ tests:
         test-version: v2
         script-name: test_acl_ops.py
         config-file-name: test_acl_ops.yaml
+        timeout: 300
+
+  - test:
+      name: Test single delete marker for versioned object using LC
+      desc: Test single delete marker for versioned object using LC
+      polarion-id: CEPH-83574806
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
+        config-file-name: test_lc_multiple_delete_marker.yaml
         timeout: 300

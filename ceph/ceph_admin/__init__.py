@@ -7,17 +7,20 @@ operations part of the cluster lifecycle.
 Over here, we create a glue between the CLI and CephCI to allow the QE to write test
 scenarios for verifying and validating cephadm.
 """
+
 from typing import Dict
 
+from cli.utilities.configure import setup_ibm_licence
 from utility.log import Log
 
 from .bootstrap import BootstrapMixin
+from .registry_login import RegistryLoginMixin
 from .shell import ShellMixin
 
 logger = Log(__name__)
 
 
-class CephAdmin(BootstrapMixin, ShellMixin):
+class CephAdmin(BootstrapMixin, ShellMixin, RegistryLoginMixin):
     """
     Ceph administrator base class which enables ceph pre-requisites
     and Inherits HostMixin and BootstrapMixin classes to support
@@ -100,6 +103,7 @@ class CephAdmin(BootstrapMixin, ShellMixin):
         cloud_type = self.config.get("cloud-type", "openstack")
         logger.info(f"cloud type is {cloud_type}")
         hotfix_repo = self.config.get("hotfix_repo")
+        base_url = self.config["base_url"]
         if hotfix_repo:
             for node in self.cluster.get_nodes():
                 logger.info(
@@ -115,30 +119,75 @@ class CephAdmin(BootstrapMixin, ShellMixin):
                     ),
                 )
                 node.exec_command(sudo=True, cmd="yum update metadata", check_ec=False)
+        elif repo:
+            base_url = repo
+            cmd = f"yum-config-manager --add-repo {base_url}"
+            for node in self.cluster.get_nodes():
+                node.exec_command(sudo=True, cmd=cmd)
+
+        elif base_url.endswith(".repo"):
+            cmd = f"yum-config-manager --add-repo {base_url}"
+            for node in self.cluster.get_nodes():
+                node.exec_command(sudo=True, cmd=cmd)
         else:
-            base_url = self.config["base_url"]
             if not base_url.endswith("/"):
                 base_url += "/"
             if cloud_type == "ibmc":
                 base_url += "Tools"
             else:
                 base_url += "compose/Tools/x86_64/os/"
-
-            if repo:
-                # provide whole path till "/x86_64/os/" for openstack,
-                # "/Tools" for IBM
-                base_url = repo
             cmd = f"yum-config-manager --add-repo {base_url}"
             for node in self.cluster.get_nodes():
                 node.exec_command(sudo=True, cmd=cmd)
 
-    def set_cdn_tool_repo(self):
+    def set_cdn_tool_repo(self, release=None):
         """
         Enable the cdn Tools repo on all ceph node.
+
+        Args:
+            release (Str): Ceph Release Version (default: None)
         """
-        cdn_repo = "rhceph-5-tools-for-rhel-8-x86_64-rpms"
-        cmd = f"subscription-manager repos --enable={cdn_repo}"
-        for node in self.cluster.get_nodes():
+        rh_cdn_repos = {
+            "8": {"9": "rhceph-8-tools-for-rhel-9-x86_64-rpms"},
+            "7": {"9": "rhceph-7-tools-for-rhel-9-x86_64-rpms"},
+            "6": {"9": "rhceph-6-tools-for-rhel-9-x86_64-rpms"},
+            "5": {
+                "8": "rhceph-5-tools-for-rhel-8-x86_64-rpms",
+                "9": "rhceph-5-tools-for-rhel-9-x86_64-rpms",
+            },
+        }
+        ibm_cdn_repos = {
+            "8": {
+                "9": "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-8-rhel-9.repo"
+            },
+            "7": {
+                "9": "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-7-rhel-9.repo"
+            },
+            "6": {
+                "9": "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-6-rhel-9.repo"
+            },
+            "5": {
+                "9": "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-5-rhel-9.repo",
+                "8": "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-5-rhel-8.repo",
+            },
+        }
+
+        rh_build = self.config.get("rhbuild", "7.1-rhel-9")
+        _release = rh_build[0]
+        if release:
+            _release = release[0]
+        os_major_version = rh_build.split("-")[-1]
+        ibm_build = self.config.get("ibm_build")
+
+        if ibm_build:
+            repo = ibm_cdn_repos[_release][os_major_version]
+        else:
+            repo = rh_cdn_repos[_release][os_major_version]
+
+        for node in self.cluster.get_nodes(ignore="client"):
+            cmd = f"subscription-manager repos --enable={repo}"
+            if ibm_build:
+                cmd = f"yum-config-manager --add-repo {repo}"
             node.exec_command(sudo=True, cmd=cmd)
 
     def setup_upstream_repository(self, repo_url=None):
@@ -147,17 +196,38 @@ class CephAdmin(BootstrapMixin, ShellMixin):
         Args:
             repo_url: repo file URL link (default: None)
         """
+        EPEL_REPOS = {
+            "7": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm",
+            "8": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm",
+            "9": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm",
+        }
+
         if not repo_url:
             repo_url = self.config["base_url"]
 
         for node in self.cluster.get_nodes():
+            # Ceph Repo
             node.exec_command(
                 sudo=True, cmd=f"curl -o /etc/yum.repos.d/upstream_ceph.repo {repo_url}"
             )
             node.exec_command(sudo=True, cmd="yum update metadata", check_ec=False)
+
+            # Epel Repo
             node.exec_command(
                 sudo=True,
-                cmd="dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm -y",
+                cmd=f"dnf install {EPEL_REPOS[node.distro_info['VERSION_ID'][0]]} -y",
+                check_ec=False,
+            )
+
+            # public repo: needed to compensate for dependencies required during
+            # installation of ceph-common and other pkg RPMs
+            public_repo_url = (
+                f"https://dl.fedoraproject.org/pub/epel/"
+                f"{node.distro_info['VERSION_ID'][0]}/Everything/x86_64/"
+            )
+            node.exec_command(
+                sudo=True,
+                cmd=f"yum-config-manager --add-repo {public_repo_url}",
                 check_ec=False,
             )
 
@@ -183,7 +253,9 @@ class CephAdmin(BootstrapMixin, ShellMixin):
         if kwargs.get("nogpgcheck", True):
             cmd += " --nogpghceck"
 
-        for node in self.cluster.get_nodes():
+        for node in self.cluster.get_nodes(ignore="client"):
+            if self.config.get("ibm_build"):
+                setup_ibm_licence(node, build_type=None)
             node.exec_command(
                 sudo=True,
                 cmd="yum install cephadm -y --nogpgcheck",

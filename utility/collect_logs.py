@@ -8,6 +8,7 @@ Run shell script on installer node, then upload all the collected logs to magna
   python collect_logs.py --ip x.x.x.x --username abc --password abcd
   python collect_logs.py -h
 """
+
 import json
 import os
 import re
@@ -132,7 +133,7 @@ def generate_sosreport_in_node(
         ssh_d = SSHConnectionManager(nodeip, uname, pword).get_client()
         ssh_d.exec_command("sudo yum -y install sos")
         stdin, stdout, stderr = ssh_d.exec_command(
-            "sudo sosreport -a --all-logs -e ceph --batch"
+            "sudo sosreport -a --all-logs --batch"
         )
         sosreport = re.search(r"/var/tmp/sosreport-.*.tar.xz", stdout)
         print(f"Successfully generated sosreport in node {nodeip} :{sosreport.group()}")

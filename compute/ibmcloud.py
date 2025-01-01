@@ -1,4 +1,5 @@
 """Support VM lifecycle operation in an OpenStack Cloud."""
+
 import socket
 from typing import Optional
 
@@ -116,7 +117,6 @@ class CephVMNodeV2:
         """
         LOG.info("Starting to create VM with name %s", node_name)
         try:
-
             ibmcloud_client = SoftLayer.VSManager(self.driver)
             keys = SoftLayer.SshKeyManager(self.driver).list_keys()
             key_ids = [d["id"] for d in keys if d["label"] == "Amarnath"]

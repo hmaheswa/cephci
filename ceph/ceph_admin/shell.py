@@ -1,4 +1,5 @@
 """Interface to cephadm shell CLI."""
+
 from copy import deepcopy
 from typing import Dict, List
 
@@ -8,7 +9,7 @@ from .common import config_dict_to_string
 from .typing_ import CephAdmProtocol
 
 LOG = Log(__name__)
-BASE_CMD = ["cephadm", "-v", "shell"]
+BASE_CMD = ["cephadm", "shell"]
 
 
 class ShellMixin:
@@ -21,6 +22,8 @@ class ShellMixin:
         check_status: bool = True,
         timeout: int = 600,
         long_running: bool = False,
+        print_output: bool = True,
+        pretty_print: bool = False,
     ):
         """
         Ceph orchestrator shell interface to run ceph commands.
@@ -31,6 +34,8 @@ class ShellMixin:
             check_status (Bool): check command status
             timeout (Int): Maximum time allowed for execution.
             long_running (Bool): Long running command (default: False)
+            print_output (Bool): Flag to decide whether the output should be printed in log or not
+            pretty_print (Bool): When enabled, output/error will be pretty printed. Default false.
 
         Returns:
             out (Str), err (Str) stdout and stderr response
@@ -51,8 +56,10 @@ class ShellMixin:
             timeout=timeout,
             check_ec=check_status,
             long_running=long_running,
+            pretty_print=pretty_print,
         )
 
         if isinstance(out, tuple):
-            LOG.debug(out[0])
+            if print_output:
+                LOG.debug(out[0])
         return out

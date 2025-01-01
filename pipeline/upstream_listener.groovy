@@ -3,9 +3,13 @@
 */
 // Global variables section
 def sharedLib
+def upstreamVersion = "${params.releaseName}" ?: "" // Gets the upstream version to be executed from params
+def osType = "centos" // OS type
+def osVersion = "9"   // OS Version
+currentBuild.description = "Upstream-branch: ${upstreamVersion}  Distro: ${osType}-${osVersion}"
 
 // Pipeline script entry point
-node("rhel-8-medium || ceph-qe-ci") {
+node("rhel-9-medium") {
     try {
         timeout(unit: "MINUTES", time: 30) {
             stage('prepareNode') {
@@ -39,16 +43,12 @@ node("rhel-8-medium || ceph-qe-ci") {
             }
 
             stage('updateRecipeFile') {
-                echo "${params.releaseName}"
-
-                upstreamVersion = "${params.releaseName}" ?: "" // Gets the upstream version to be executed from params
-
                 try{
-                    sharedLib.updateUpstreamFile(upstreamVersion) //Updates upstream.yaml
+                    sharedLib.updateUpstreamFile(upstreamVersion, osType, osVersion) //Updates upstream.yaml
                 } catch(Exception err) {
                     retry(10) {
                         echo "Execution failed, Retrying..."
-                        sharedLib.updateUpstreamFile(upstreamVersion)
+                        sharedLib.updateUpstreamFile(upstreamVersion, osType, osVersion)
                     }
                     currentBuild.result = "ABORTED"
                     println err.getMessage()
@@ -76,6 +76,19 @@ node("rhel-8-medium || ceph-qe-ci") {
             )
             subject += "\n Jenkins URL: ${env.BUILD_URL}"
             googlechatnotification(url: "id:rhcephCIGChatRoom", message: subject)
+        }
+    } finally {
+        if ( upstreamVersion == "main" ) {
+            build ([
+                wait: false,
+                job: "rhceph-upstream-listener",
+                parameters: [string(name: 'releaseName', value: "quincy")]
+            ])
+            build ([
+                wait: false,
+                job: "rhceph-upstream-listener",
+                parameters: [string(name: 'releaseName', value: "reef")]
+            ])
         }
     }
 }

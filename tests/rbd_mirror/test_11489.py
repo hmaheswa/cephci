@@ -46,7 +46,7 @@ def run(**kw):
                 imagespec, config.get("delay")
             )
         )
-        mirror1.enable_mirroring("image", imagespec)
+        mirror1.enable_mirroring(mirror_level="image", specs=imagespec)
         mirror1.wait_for_status(poolname=poolname, health_pattern="OK")
         mirror2.wait_for_status(poolname=poolname, health_pattern="OK")
         mirror2.wait_for_status(poolname=poolname, images_pattern=1)
@@ -63,7 +63,7 @@ def run(**kw):
                 imagespec + "2", config.get("delay")
             )
         )
-        mirror1.enable_mirroring("image", imagespec + "2")
+        mirror1.enable_mirroring(mirror_level="image", specs=imagespec + "2")
         mirror1.wait_for_status(poolname=poolname, health_pattern="OK")
         mirror2.wait_for_status(poolname=poolname, health_pattern="OK")
         mirror2.wait_for_status(poolname=poolname, images_pattern=2)
@@ -93,9 +93,11 @@ def run(**kw):
                     return 1
                 time.sleep(10)
 
-        mirror1.clean_up(peercluster=mirror2, pools=[poolname])
         return 0
 
     except Exception as e:
         log.exception(e)
         return 1
+
+    finally:
+        mirror1.clean_up(peercluster=mirror2, pools=[poolname])

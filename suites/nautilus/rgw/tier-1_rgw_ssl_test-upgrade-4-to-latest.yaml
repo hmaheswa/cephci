@@ -26,7 +26,15 @@ tests:
           osd_auto_discovery: false
           fetch_directory: ~/fetch
           copy_admin_key: true
-          dashboard_enabled: false
+          dashboard_enabled: true
+          dashboard_admin_user: admin
+          dashboard_admin_password: p@ssw0rd
+          grafana_admin_user: admin
+          grafana_admin_password: p@ssw0rd
+          node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+          grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+          prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+          alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
           radosgw_frontend_ssl_certificate: "/etc/ceph/server.pem"
           radosgw_frontend_port: 443
           ceph_conf_overrides:
@@ -62,7 +70,7 @@ tests:
   - test:
       name: swift download large object tests
       desc: download large object in swift
-      polarion-id: CEPH-9809
+      polarion-id: CEPH-9809 # CEPH-9816
       module: sanity_rgw.py
       config:
         script-name: test_swift_basic_ops.py
@@ -127,7 +135,7 @@ tests:
       polarion-id: CEPH-11179 # also applies to CEPH-11180
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_rule_prefix_and_tag.yaml
         timeout: 300
 
@@ -137,14 +145,14 @@ tests:
       polarion-id: CEPH-11190
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_rule_prefix_non_current_days.yaml
         timeout: 300
 
   # upgrade ceph cluster
   - test:
       name: Upgrade ceph cluster to 4.x latest
-      polarion-id: CEPH-83574675
+      polarion-id: CEPH-83574647
       module: test_ansible_upgrade.py
       config:
         ansi_config:
@@ -157,7 +165,15 @@ tests:
           radosgw_frontend_ssl_certificate: "/etc/ceph/server.pem"
           radosgw_frontend_port: 443
           upgrade_ceph_packages: true
-          dashboard_enabled: false
+          dashboard_enabled: true
+          dashboard_admin_user: admin
+          dashboard_admin_password: p@ssw0rd
+          grafana_admin_user: admin
+          grafana_admin_password: p@ssw0rd
+          node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+          grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+          prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+          alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
           ceph_conf_overrides:
               client:
                 rgw_override_bucket_index_max_shards: 17
@@ -199,7 +215,7 @@ tests:
   - test:
       name: swift download large object tests
       desc: download large object in swift
-      polarion-id: CEPH-9809
+      polarion-id: CEPH-9809 #CEPH-9816
       module: sanity_rgw.py
       config:
         script-name: test_swift_basic_ops.py
@@ -254,7 +270,7 @@ tests:
       polarion-id: CEPH-11180 # also applies to CEPH-11179
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_rule_prefix_and_tag.yaml
         timeout: 300
   - test:
@@ -263,7 +279,7 @@ tests:
       polarion-id: CEPH-11190
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_rule_prefix_non_current_days.yaml
         timeout: 300
 

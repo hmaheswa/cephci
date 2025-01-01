@@ -1,11 +1,11 @@
 """Filestore to bluestore migrations"""
+
 from utility.log import Log
 
 log = Log(__name__)
 
 
 def run(**kw):
-
     log.info("Running Filestore to bluestore migrations test")
     ceph_nodes = kw.get("ceph_nodes")
     ansible_dir = "/usr/share/ceph-ansible"

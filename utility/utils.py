@@ -1,6 +1,6 @@
 import datetime
 import getpass
-import logging
+import json
 import os
 import random
 import re
@@ -55,6 +55,29 @@ magna_rhcs_artifacts = f"{magna_server}/cephci-jenkins/latest-rhceph-container-i
 
 class TestSetupFailure(Exception):
     pass
+
+
+def config_dict_to_string(data: Dict) -> str:
+    """
+    Convert the provided data to a string of optional arguments.
+
+    Args:
+        data (Dict):   Key/value pairs that are CLI optional arguments
+
+    Return:
+        string instead of the a data dict (Str)
+    """
+    rtn = ""
+    for key, value in data.items():
+        if isinstance(value, bool) and value is False:
+            continue
+
+        rtn += f" -{key}" if len(key) == 1 else f" --{key}"
+
+        if not isinstance(value, bool):
+            rtn += f" {value}"
+
+    return rtn
 
 
 # function for getting the clients
@@ -146,10 +169,330 @@ def fuse_mount(fuse_clients, mounting_dir):
         log.error(e)
 
 
-def verify_sync_status(verify_io_on_site_node, retry=10, delay=60):
+def test_user_stats_consistency(primary_rgw_node, secondary_rgw_node):
     """
-    verify multisite sync status on primary
+    verify and monitor sync consistency via user stats across sites.
     """
+    log.info("Test number of users are consistent across sites")
+    total_users_on_primary = json.loads(
+        primary_rgw_node.exec_command(cmd="sudo radosgw-admin user list | wc -l")[0]
+    )
+    total_users_on_secondary = json.loads(
+        secondary_rgw_node.exec_command(cmd="sudo radosgw-admin user list | wc -l")[0]
+    )
+    user_list_primary = json.loads(
+        primary_rgw_node.exec_command(cmd="sudo radosgw-admin user list")[0]
+    )
+    if total_users_on_primary == total_users_on_secondary:
+        total_user = total_users_on_secondary - 2
+        for user in range(0, total_user):
+            user_name = user_list_primary[user]
+            (
+                tenancy,
+                uid,
+                tenant,
+                pri_size,
+                sec_size,
+                pri_objects,
+                sec_objects,
+            ) = test_tenancy(primary_rgw_node, secondary_rgw_node, user_name)
+            if pri_size == sec_size and pri_objects == sec_objects:
+                log.info(f"user stats are consistent across sites for {user_name}")
+            else:
+                log.info(
+                    "user stats inconsistent, perform sync-stats on both sites and retest for consistency"
+                )
+                cmd = f"sudo radosgw-admin user stats --sync-stats --uid {uid}"
+                if tenancy:
+                    cmd = f"{cmd} --tenant {tenant}"
+                primary_rgw_node.exec_command(cmd=cmd)
+                secondary_rgw_node.exec_command(cmd=cmd)
+
+                (
+                    tenancy,
+                    uid,
+                    tenant,
+                    pri_size,
+                    sec_size,
+                    pri_objects,
+                    sec_objects,
+                ) = test_tenancy(primary_rgw_node, secondary_rgw_node, user_name)
+
+                if pri_size == sec_size and pri_objects == sec_objects:
+                    log.info(
+                        "user stats for {user_name} are consistent after sync-stats."
+                    )
+
+                else:
+                    raise Exception(
+                        "User {user_name} not synced across sites even after sync-stats, test failure."
+                    )
+    else:
+        raise Exception("Users not synced across sites, test failure.")
+
+
+def test_tenancy(primary_rgw_node, secondary_rgw_node, user_name):
+    at_index = user_name.find("$")
+    if at_index != -1:
+        log.info("It is a tenanted user, find uid and tenant.")
+        tenancy = "true"
+        len_str = len(user_name)
+        tenant = user_name[0:at_index]
+        uid = user_name[at_index + 1 : len_str]
+        cmd = f"sudo radosgw-admin user stats --uid {uid}"
+        user_stat_pri_doc = json.loads(
+            primary_rgw_node.exec_command(cmd=f"{cmd} --tenant {tenant}")[0]
+        )
+        user_stat_sec_doc = json.loads(
+            secondary_rgw_node.exec_command(cmd=f"{cmd} --tenant {tenant}")[0]
+        )
+
+    else:
+        log.info("It is a non-tenanted user.")
+        tenancy = "false"
+        uid = user_name
+        tenant = "default"
+        cmd = f"sudo radosgw-admin user stats --uid {uid}"
+
+        user_stat_pri_doc = json.loads(primary_rgw_node.exec_command(cmd=f"{cmd}")[0])
+        user_stat_sec_doc = json.loads(secondary_rgw_node.exec_command(cmd=f"{cmd}")[0])
+
+    primary_size = user_stat_pri_doc["stats"]["size"]
+    secondary_size = user_stat_sec_doc["stats"]["size"]
+    primary_objects = user_stat_pri_doc["stats"]["num_objects"]
+    secondary_objects = user_stat_sec_doc["stats"]["num_objects"]
+
+    return (
+        tenancy,
+        uid,
+        tenant,
+        primary_size,
+        secondary_size,
+        primary_objects,
+        secondary_objects,
+    )
+
+
+def test_sync_via_bucket_stats(primary_rgw_node, secondary_rgw_node):
+    """
+    verify and monitor sync consistency via bucket stats across sites.
+    """
+    bucket_stat_pri_doc = json.loads(
+        primary_rgw_node.exec_command(cmd="sudo radosgw-admin bucket stats")[0]
+    )
+    bucket_stat_sec_doc = json.loads(
+        secondary_rgw_node.exec_command(cmd="sudo radosgw-admin bucket stats")[0]
+    )
+    total_buckets_pri = json.loads(
+        primary_rgw_node.exec_command(cmd="sudo radosgw-admin bucket list | wc -l")[0]
+    )
+    total_buckets_sec = json.loads(
+        secondary_rgw_node.exec_command(cmd="sudo radosgw-admin bucket list | wc -l")[0]
+    )
+    if total_buckets_pri == total_buckets_sec:
+        log.info("Number of buckets same on both sites, test data consistency now")
+        for bucket in range(0, total_buckets_pri - 2):
+            primary_objects = (
+                bucket_stat_pri_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("num_objects", 0)
+            )
+            secondary_objects = (
+                bucket_stat_sec_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("num_objects", 0)
+            )
+            primary_size_actual = (
+                bucket_stat_pri_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("size_actual", 0)
+            )
+            secondary_size_actual = (
+                bucket_stat_sec_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("size_actual", 0)
+            )
+            bucket_name = bucket_stat_sec_doc[bucket]["bucket"]
+            if (
+                primary_objects == secondary_objects
+                and primary_size_actual == secondary_size_actual
+            ):
+                log.info(f"bucket stats for bucket {bucket_name} is consistent")
+
+            else:
+                raise Exception(
+                    f"bucket stats for bucket {bucket_name} is inconsistent, test failure."
+                )
+    else:
+        raise Exception("Buckets not synced across sites, test failure.")
+
+
+def test_bucket_stats_with_archive(
+    primary_client_node, secondary_client_node, archive_client_node
+):
+    """
+    verify and monitor sync consistency via bucket stats across sites.
+    """
+    bucket_stat_pri_doc = json.loads(
+        primary_client_node.exec_command(cmd="sudo radosgw-admin bucket stats")[0]
+    )
+    bucket_stat_sec_doc = json.loads(
+        secondary_client_node.exec_command(cmd="sudo radosgw-admin bucket stats")[0]
+    )
+    total_buckets_pri = json.loads(
+        primary_client_node.exec_command(cmd="sudo radosgw-admin bucket list | wc -l")[
+            0
+        ]
+    )
+    total_buckets_sec = json.loads(
+        secondary_client_node.exec_command(
+            cmd="sudo radosgw-admin bucket list | wc -l"
+        )[0]
+    )
+    total_buckets_arc = json.loads(
+        archive_client_node.exec_command(cmd="sudo radosgw-admin bucket list | wc -l")[
+            0
+        ]
+    )
+    log.info(
+        f"number of buckets at primary and secondary are {total_buckets_pri} and {total_buckets_sec}"
+    )
+    deleted_buckets_arc = json.loads(
+        archive_client_node.exec_command(
+            cmd="sudo radosgw-admin bucket list | grep deleted | wc -l"
+        )[0]
+    )
+    actual_bucket_arc = total_buckets_arc - deleted_buckets_arc
+    log.info(
+        f"number of buckets at archive site is {total_buckets_arc} - {deleted_buckets_arc} = {actual_bucket_arc}"
+    )
+
+    if total_buckets_pri == total_buckets_sec == actual_bucket_arc:
+        log.info("Number of buckets same on all sites, test data consistency now")
+        for bucket in range(0, total_buckets_pri - 2):
+            primary_objects = (
+                bucket_stat_pri_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("num_objects", 0)
+            )
+            secondary_objects = (
+                bucket_stat_sec_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("num_objects", 0)
+            )
+            bucket_stat_arc_doc = json.loads(
+                archive_client_node.exec_command(
+                    cmd=f"sudo radosgw-admin bucket stats --bucket {bucket_stat_sec_doc[bucket]['bucket']}"
+                )[0]
+            )
+            archive_objects = (
+                bucket_stat_arc_doc["usage"].get("rgw.main", {}).get("num_objects", 0)
+            )
+            primary_size_actual = (
+                bucket_stat_pri_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("size_actual", 0)
+            )
+            secondary_size_actual = (
+                bucket_stat_sec_doc[bucket]["usage"]
+                .get("rgw.main", {})
+                .get("size_actual", 0)
+            )
+            archive_size_actual = (
+                bucket_stat_arc_doc["usage"].get("rgw.main", {}).get("size_actual", 0)
+            )
+            bucket_name = bucket_stat_sec_doc[bucket]["bucket"]
+            if (
+                primary_objects == secondary_objects == archive_objects
+                and primary_size_actual == secondary_size_actual == archive_size_actual
+            ):
+                log.info(f"bucket stats for bucket {bucket_name} is consistent")
+
+            else:
+                raise Exception(
+                    f"bucket stats for bucket {bucket_name} is inconsistent, test failure."
+                )
+    else:
+        raise Exception("Buckets not synced across sites, test failure.")
+
+
+def retain_bucket_pol_at_archive(
+    primary_client_node, secondary_client_node, archive_client_node
+):
+    """
+    Bucket policy shoud not disappear in archive zone when an object is inserted in master zone bucket.
+    """
+    bucket_stat_pri_doc = json.loads(
+        primary_client_node.exec_command(cmd="sudo radosgw-admin bucket stats")[0]
+    )
+    total_buckets = json.loads(
+        primary_client_node.exec_command(cmd="sudo radosgw-admin bucket list | wc -l")[
+            0
+        ]
+    )
+    bucket_name_list = json.loads(
+        primary_client_node.exec_command(cmd="sudo radosgw-admin bucket list")[0]
+    )
+    for bucket in range(0, total_buckets - 2):
+        bucket_id = bucket_stat_pri_doc[bucket]["id"]
+        bucket_name = bucket_name_list[bucket]
+        log.info(f"Test attrs are same for bucket {bucket_name} on all sites")
+        json_doc_arc = json.loads(
+            archive_client_node.exec_command(
+                cmd=f"radosgw-admin metadata get bucket.instance:{bucket_name}:{bucket_id}"
+            )[0]
+        )
+        json_doc_pri = json.loads(
+            primary_client_node.exec_command(
+                cmd=f"radosgw-admin metadata get bucket.instance:{bucket_name}:{bucket_id}"
+            )[0]
+        )
+        attrs_arc = json_doc_arc["data"]["attrs"][0]
+        attrs_pri = json_doc_pri["data"]["attrs"][0]
+        if attrs_arc == attrs_pri:
+            log.info(
+                f"Bucket policy retained at archive archive site after writing objects to the bucket {bucket_name}"
+            )
+        else:
+            raise Exception(
+                "Bucket policy not retained after put objects, test failure."
+            )
+
+
+def verify_sync_status(verify_io_on_site_node, retry=25, delay=60):
+    """
+    verify RGW multisite sync status
+    """
+    ceph_version = verify_io_on_site_node.exec_command(cmd="sudo ceph version")
+    ceph_version = ceph_version[0].split()[4]
+    out = verify_io_on_site_node.exec_command(cmd="ceph orch ls | grep rgw")
+    rgw_name = out[0].split()[0]
+    if ceph_version == "pacific":
+        out = verify_io_on_site_node.exec_command(cmd="ceph orch ps | grep rgw")
+        rgw_process_name = out[0].split()[0]
+        out = verify_io_on_site_node.exec_command(
+            cmd=f"ceph config set client.{rgw_process_name} rgw_sync_lease_period 120"
+        )
+        verify_io_on_site_node.exec_command(cmd=f"ceph orch restart {rgw_name}")
+        time.sleep(20)
+
+    for retry_count in range(3):
+        check_sync_status, err = verify_io_on_site_node.exec_command(
+            cmd="sudo radosgw-admin sync status"
+        )
+        log.info(check_sync_status)
+        if (
+            "failed to fetch master sync status" in check_sync_status
+            or "failed to retrieve sync info" in check_sync_status
+            or "Input/output error" in check_sync_status
+        ):
+            verify_io_on_site_node.exec_command(cmd=f"ceph orch restart {rgw_name}")
+            time.sleep(120)
+        else:
+            break
+    else:
+        raise Exception("input/output failure in sync status")
+
     check_sync_status, err = verify_io_on_site_node.exec_command(
         cmd="sudo radosgw-admin sync status"
     )
@@ -189,6 +532,7 @@ def verify_sync_status(verify_io_on_site_node, retry=10, delay=60):
                 f"sync is still in progress. with {retry} retries and sleep of {delay}secs between each retry"
             )
 
+    log.info(check_sync_status)
     # check metadata sync status
     if "metadata is behind" in check_sync_status:
         raise Exception("metadata sync is either in progress or stuck")
@@ -196,8 +540,60 @@ def verify_sync_status(verify_io_on_site_node, retry=10, delay=60):
     # check status for complete sync
     if "data is caught up with source" in check_sync_status:
         log.info("sync status complete")
+    elif (
+        "archive" in check_sync_status and "not syncing from zone" in check_sync_status
+    ):
+        log.info("data from archive zone does not sync to source zone as per design")
     else:
         raise Exception("sync is either in progress or stuck")
+
+    # check for large omap in cluster status
+    check_ceph_status(verify_io_on_site_node)
+
+
+def check_ceph_status(site):
+    """
+    get the ceph cluster status and health
+    """
+    log.info("get ceph status")
+    ceph_status = site.exec_command(cmd="sudo ceph status")
+    log.info(ceph_status)
+    if "HEALTH_ERR" in ceph_status or "large omap objects" in ceph_status:
+        raise Exception(
+            "ceph status is either in HEALTH_ERR or we have large omap objects."
+        )
+
+
+def set_config_param(node):
+    """
+    To set configuration parameters across sites
+    :param node: exec_node from site
+    """
+    # select the rgw daemon name to set the configuration parameter/s
+    rgw_process = node.exec_command(cmd="ceph orch ps | grep rgw")
+    rgw_process_name = rgw_process[0].split()[0]
+
+    # add the configuration/s to be set on service
+    configs = ["rgw_max_objs_per_shard 5", "rgw_lc_debug_interval 30"]
+    for config_cmd in configs:
+        node.exec_command(cmd=f"ceph config set client.{rgw_process_name} {config_cmd}")
+
+    # restart rgw service for changes to take effect
+    rgw_service = node.exec_command(cmd="ceph orch ls | grep rgw")
+    rgw_service_name = rgw_service[0].split()[0]
+    node.exec_command(cmd=f"ceph orch restart {rgw_service_name}")
+
+    # select osd service name to set configuration parameter/s
+    osd_process = node.exec_command(cmd="ceph orch ls | grep osd")
+    osd_process_name = osd_process[0].split()[0]
+
+    # add the configuration/s to be set on service
+    configs = ["osd_deep_scrub_large_omap_object_key_threshold 200"]
+    for config_cmd in configs:
+        node.exec_command(cmd=f"ceph config set osd {config_cmd}")
+    # restart osd service
+    node.exec_command(cmd=f"ceph orch restart {osd_process_name}")
+    node.exec_command(cmd="ceph config dump")
 
 
 def kernel_mount(mounting_dir, mon_node_ip, kernel_clients):
@@ -412,7 +808,6 @@ def rc_verify(tc, RC):
     return_codes_set = set(RC)
 
     if len(return_codes_set) == 1:
-
         out = "Test case %s Passed" % (tc)
 
         return out
@@ -429,52 +824,6 @@ def rc_verify(tc, RC):
 #     FAIL = '\033[91m'
 #     ENDC = '\033[0m'
 #     BOLD = '\033[1m'
-
-
-def configure_logger(test_name, run_dir):
-    """
-    Configures a new FileHandler for the root logger.
-
-    Args:
-        test_name: name of the test being executed. used for naming the logfile
-        run_dir: directory where logs are being placed
-
-    Returns:
-        URL where the log file can be viewed or None if the run_dir does not exist
-    """
-    if not os.path.isdir(run_dir):
-        log.error(
-            f"Run directory '{run_dir}' does not exist, logs will not output to file."
-        )
-        return None
-
-    close_and_remove_filehandlers()
-    log_format = logging.Formatter(log.log_format)
-
-    full_log_name = f"{test_name}.log"
-    test_logfile = os.path.join(run_dir, full_log_name)
-    log.info(f"Test logfile: {test_logfile}")
-
-    _handler = logging.FileHandler(test_logfile)
-    _handler.setFormatter(log_format)
-    log.logger.addHandler(_handler)
-
-    # error file handler
-    err_logfile = os.path.join(run_dir, f"{test_name}.err")
-    _err_handler = logging.FileHandler(err_logfile)
-    _err_handler.setFormatter(log_format)
-    _err_handler.setLevel(logging.ERROR)
-    log.logger.addHandler(_err_handler)
-
-    url_base = (
-        magna_url + run_dir.split("/")[-1]
-        if "/ceph/cephci-jenkins" in run_dir
-        else run_dir
-    )
-    log_url = "{url_base}/{log_name}".format(url_base=url_base, log_name=full_log_name)
-    log.debug("Completed log configuration")
-
-    return log_url
 
 
 def create_run_dir(run_id, log_dir=""):
@@ -506,29 +855,12 @@ def create_run_dir(run_id, log_dir=""):
 
     print(f"log directory - {base_dir}")
     try:
-        os.makedirs(base_dir)
+        os.makedirs(base_dir, exist_ok=True)
     except OSError:
         if "jenkins" in getpass.getuser():
             raise
 
     return base_dir
-
-
-def close_and_remove_filehandlers(logger=logging.getLogger("cephci")):
-    """
-    Close FileHandlers and then remove them from the loggers handlers list.
-
-    Args:
-        logger: the logger in which to remove the handlers from, defaults to root logger
-
-    Returns:
-        None
-    """
-    handlers = logger.handlers[:]
-    for h in handlers:
-        if isinstance(h, logging.FileHandler):
-            h.close()
-            logger.removeHandler(h)
 
 
 def create_report_portal_session():
@@ -742,7 +1074,6 @@ def email_results(test_result):
 
     Returns: None
     """
-
     try:
         run_id = test_result["run_id"]
         results_list = test_result["result"]
@@ -837,9 +1168,13 @@ def create_html_file(test_result) -> str:
         suite_run_time = test_result["total_time"]
         info = test_result["info"]
         test_results = test_result["result"]
+        prefix = test_result["prefix"]
     except KeyError as kerr:
         log.error(f"Key not found : {kerr}")
         exit(1)
+
+    # Check for cluster info
+    cluster_info = test_result.get("cluster_info", None)
 
     # we are checking for /ceph/cephci-jenkins to see if the magna is already mounted
     # on system we are executing
@@ -866,6 +1201,8 @@ def create_html_file(test_result) -> str:
         trigger_user=trigger_user,
         info=info,
         use_abs_log_link=True,
+        prefix=prefix,
+        cluster_info=cluster_info,
     )
 
     # Result.html file is stored in the folder containing the log files.
@@ -879,6 +1216,8 @@ def create_html_file(test_result) -> str:
         trigger_user=trigger_user,
         info=info,
         use_abs_log_link=False,
+        cluster_info=cluster_info,
+        prefix=prefix,
     )
 
     abs_path = os.path.join(run_dir, "index.html")
@@ -1103,9 +1442,11 @@ def generate_self_signed_certificate(subject: Dict) -> Tuple:
             encryption_algorithm=serialization.NoEncryption(),
         ).decode("utf-8"),
         cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),
-        ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
-        if ca_cert
-        else None,
+        (
+            ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+            if ca_cert
+            else None
+        ),
     )
 
 
@@ -1126,30 +1467,58 @@ def fetch_build_artifacts(build, ceph_version, platform, upstream_build=None):
     """
     try:
         recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
-        filename = (
-            f"{build}.yaml" if build == "upstream" else f"RHCEPH-{ceph_version}.yaml"
-        )
+        filename = f"RHCEPH-{ceph_version}.yaml"
+        if build == "upstream":
+            version = str(upstream_build).upper() if upstream_build else "MAIN"
+            filename = f"UPSTREAM-{version}.yaml"
+
         url = f"{recipe_url}{filename}"
         data = requests.get(url, verify=False)
         yml_data = yaml.safe_load(data.text)
 
-        build_info = (
-            yml_data[upstream_build] if build == "upstream" else yml_data[build]
-        )
+        build_info = yml_data["latest"] if build == "upstream" else yml_data[build]
 
-        container_image = (
-            build_info["image"] if build == "upstream" else build_info["repository"]
-        )
+        container_image = build_info["repository"]
+
         registry, image_name = container_image.split(":")[0].split("/", 1)
         image_tag = container_image.split(":")[-1]
-        base_url = (
-            build_info["composes"]
-            if build == "upstream"
-            else build_info["composes"][platform]
-        )
+        base_url = build_info["composes"][platform]
         return base_url, registry, image_name, image_tag
     except Exception as e:
         raise TestSetupFailure(f"Could not fetch build details of : {e}")
+
+
+def check_build_overrides(
+    rpm: any,
+    registry: any,
+    image: any,
+    tag: any,
+):
+    """Validate Ceph build Override arguments.
+
+    Ceph build parameter values can be overridden by below args. they are,
+     --rhs-ceph-repo
+     --docker-registry
+     --docker-image
+     --docker-image-tag
+
+    Conditions:
+    - Over-ridden :  all arguments has value, then return True
+    - Not-Over-ridden : all arguments has no value, then return False
+    - Exception : Not all args are provided, then raise Exception.
+
+    Returns:
+        Boolean
+    """
+    values = [i for i in [rpm, registry, image, tag] if i].__len__()
+    length = 4
+
+    if values == length:
+        return True
+    elif values == 0:
+        return False
+    elif 0 < values < length:
+        raise Exception(f"{check_build_overrides.__doc__}")
 
 
 def rp_deco(func):
@@ -1320,7 +1689,8 @@ def install_start_kafka(rgw_node, cloud_type):
     rename_cmd = "mv /usr/local/kafka_2.13-2.8.0 /usr/local/kafka"
     chown_cmd = "chown cephuser:cephuser /usr/local/kafka"
     rgw_node.exec_command(
-        cmd=f"{wget_cmd} && {tar_cmd} && {rename_cmd} && {chown_cmd}", sudo=True
+        cmd=f"ls /usr/local/kafka/ || ({wget_cmd} && {tar_cmd} && {rename_cmd} && {chown_cmd})",
+        sudo=True,
     )
 
     KAFKA_HOME = "/usr/local/kafka"
@@ -1344,6 +1714,122 @@ def install_start_kafka(rgw_node, cloud_type):
 
     # wait for kafka service to start
     time.sleep(30)
+
+
+def configure_kafka_security(rgw_node, cloud_type):
+    """Configure kafka security and restart zookeeper and kafka services."""
+    KAFKA_HOME = "/usr/local/kafka"
+
+    # append security types configuration into server.properties
+    if cloud_type == "ibmc":
+        curl_server_properties = "curl -o /tmp/kafka_server.properties https://10.245.4.89/kafka_server.properties"
+    else:
+        curl_server_properties = (
+            "curl -o /tmp/kafka_server.properties http://magna002.ceph.redhat.com/cephci-jenkins"
+            + "/kafka_server.properties"
+        )
+    rgw_node.exec_command(
+        sudo=True,
+        cmd=curl_server_properties,
+    )
+    rgw_node.exec_command(
+        sudo=True,
+        cmd=f"yes | cp /tmp/kafka_server.properties {KAFKA_HOME}/config/server.properties",
+    )
+
+    # download kafka_security.sh script, create certs and store them in keystore and truststore
+    if cloud_type == "ibmc":
+        curl_security_sh = (
+            "curl -o /tmp/kafka-security.sh https://10.245.4.89/kafka-security.sh"
+        )
+    else:
+        curl_security_sh = (
+            "curl -o /tmp/kafka-security.sh http://magna002.ceph.redhat.com/cephci-jenkins"
+            + "/kafka-security.sh"
+        )
+    rgw_node.exec_command(
+        sudo=True,
+        cmd=curl_security_sh,
+    )
+    status = rgw_node.exec_command(
+        sudo=True,
+        cmd=f"chmod +x /tmp/kafka-security.sh ; cd {KAFKA_HOME} ; /tmp/kafka-security.sh",
+        long_running=True,
+    )
+    if status != 0:
+        raise Exception("kafka-security.sh script failed")
+
+    # stop kafka service
+    rgw_node.exec_command(
+        check_ec=False,
+        sudo=True,
+        cmd=f"{KAFKA_HOME}/bin/kafka-server-stop.sh",
+    )
+
+    # wait for kafka service to stop
+    time.sleep(30)
+
+    # stop zookeeper service
+    rgw_node.exec_command(
+        check_ec=False,
+        sudo=True,
+        cmd=f"{KAFKA_HOME}/bin/zookeeper-server-stop.sh",
+    )
+
+    # wait for zookeepeer service to stop
+    time.sleep(30)
+
+    # start zookeeper service
+    rgw_node.exec_command(
+        check_ec=False,
+        sudo=True,
+        cmd=f"{KAFKA_HOME}/bin/zookeeper-server-start.sh -daemon {KAFKA_HOME}/config/zookeeper.properties",
+    )
+
+    # wait for zookeepeer service to start
+    time.sleep(30)
+
+    # start kafka servicee
+    rgw_node.exec_command(
+        check_ec=False,
+        sudo=True,
+        cmd=f"{KAFKA_HOME}/bin/kafka-server-start.sh -daemon {KAFKA_HOME}/config/server.properties",
+    )
+
+    # wait for kafka service to start
+    time.sleep(30)
+
+    # add config for user alice
+    rgw_node.exec_command(
+        sudo=True,
+        cmd=f"{KAFKA_HOME}/bin/kafka-configs.sh --zookeeper localhost:2181 --alter --add-config"
+        + " 'SCRAM-SHA-256=[iterations=8192,password=alice-secret],SCRAM-SHA-512=[password=alice-secret]'"
+        + " --entity-type users --entity-name alice",
+    )
+
+    # set rgw_allow_notification_secrets_in_cleartext to true
+    out = rgw_node.exec_command(sudo=True, cmd="ceph orch ps | grep rgw")
+    rgw_process_name = out[0].split()[0]
+    out = rgw_node.exec_command(
+        sudo=True,
+        cmd=f"ceph config set client.{rgw_process_name} rgw_allow_notification_secrets_in_cleartext true",
+    )
+
+    # mount kafka directory to rgw container by modifying podman run command in unit.run
+    out = rgw_node.exec_command(sudo=True, cmd="ceph fsid")
+    log.info(out)
+    ceph_fsid = out[0].strip()
+    unit_run_path = f"/var/lib/ceph/{ceph_fsid}/{rgw_process_name}/unit.run"
+    rgw_node.exec_command(
+        sudo=True,
+        cmd=f"grep -q '.*podman run -v /usr/local/kafka:/usr/local/kafka.*' {unit_run_path}"
+        + f" || sed -i 's|podman run|podman run -v /usr/local/kafka:/usr/local/kafka|' {unit_run_path}",
+    )
+
+    # restart rgw service
+    out = rgw_node.exec_command(sudo=True, cmd="ceph orch ls | grep rgw")
+    rgw_name = out[0].split()[0]
+    rgw_node.exec_command(sudo=True, cmd=f"ceph orch restart {rgw_name}")
 
 
 def method_should_succeed(function, *args, **kwargs):
@@ -1425,37 +1911,225 @@ def clone_the_repo(config, node, path_to_clone):
     node.exec_command(cmd=f"cd {path_to_clone} ; {git_clone_cmd}")
 
 
-def run_fio(**kw):
+def calculate_available_storage(node):
+    """
+    Calculate maximum storage that is available to be used.
+    It is the amount of data that can be used before the first OSD becomes full.
+    This is implicitly divided by replication factor or erasure code
+
+    Ceph uses below given formula to calculate MAX AVAIL value :
+    [min(osd.avail for osd in OSD_up) - ( min(osd.avail for osd in OSD_up).total_size * (1 - mon_osd_full_ratio)) ]
+      * len(osd.avail for osd in OSD_up) /pool.size()
+    min(osd.avail for osd in OSD_up) : Minimum space left in an OSD in up set in pool crush ruleset.
+      your usage is bounded by osd.X.
+    len(osd.avail for osd in OSD_up) : Number of OSDs in UP set in pool crush ruleset
+    pool.size() : pool replication size
+    refer https://access.redhat.com/solutions/2273951
+
+    Args:
+        node: node on which ceph commands are executed
+
+    Returns:
+        Max available space in bytes
+    """
+    import json
+
+    log.info("Fetching maximum available storage")
+    out, err = node.exec_command(cmd="sudo radosgw-admin zone get --format json")
+    out = json.loads(out)
+    zone_name = out["name"]
+    rgw_bucket_data_pool = f"{zone_name}.rgw.buckets.data"
+    out, err = node.exec_command(cmd="sudo ceph df --format json")
+    if rgw_bucket_data_pool not in out:
+        log.info(
+            f"{rgw_bucket_data_pool} doesn't exist, so creating it and enabling rgw application"
+        )
+        node.exec_command(cmd=f"sudo ceph osd pool create {rgw_bucket_data_pool}")
+        time.sleep(10)
+        node.exec_command(
+            cmd=f"sudo ceph osd pool application enable {rgw_bucket_data_pool} rgw"
+        )
+        time.sleep(10)
+        out, err = node.exec_command(cmd="sudo ceph df --format json")
+    ceph_df_json = json.loads(out)
+    for pool in ceph_df_json["pools"]:
+        if pool["name"] == rgw_bucket_data_pool:
+            return pool["stats"]["max_avail"]
+    raise Exception(f"{rgw_bucket_data_pool} not found")
+
+
+def get_utilized_space(node, pool_name=None):
+    """
+    Returns actual number of bytes used up in the pool. This is without replicated space
+
+    Args:
+        node: node on which ceph commands are executed
+        pool_name: number of
+
+    Returns:
+        actual number of bytes used up in the pool
+    """
+    import json
+
+    log.info("Fetching number of bytes used up in the pool")
+    if pool_name is None:
+        out, err = node.exec_command(cmd="sudo radosgw-admin zone get --format json")
+        out = json.loads(out)
+        zone_name = out["name"]
+        pool_name = f"{zone_name}.rgw.buckets.data"
+    out, err = node.exec_command(cmd="sudo ceph df --format json")
+    ceph_df_json = json.loads(out)
+    for pool in ceph_df_json["pools"]:
+        if pool["name"] == pool_name:
+            return pool["stats"]["stored"]
+    raise Exception(f"{pool_name} not found")
+
+
+def perform_env_setup(config, node, ceph_cluster):
+    config["git-url"] = config.get(
+        "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
+    )
+    config["test_folder"] = config.get("test_folder", "rgw-tests")
+    test_folder_path = f"~/{config['test_folder']}"
+    pip_cmd = "venv/bin/pip"
+    node.exec_command(cmd=f'sudo rm -rf {config["test_folder"]}')
+    node.exec_command(cmd=f"sudo mkdir {config['test_folder']}")
+    clone_the_repo(config, node, test_folder_path)
+
+    setup_cluster_access(ceph_cluster, node)
+    node.exec_command(
+        sudo=True, cmd="yum install -y ceph-common --nogpgcheck", check_ec=False
+    )
+
+    out, err = node.exec_command(cmd="ls -l venv", check_ec=False)
+
+    if not out:
+        node.exec_command(
+            cmd="yum install python3 -y --nogpgcheck", check_ec=False, sudo=True
+        )
+        node.exec_command(cmd="python3 -m venv venv")
+        node.exec_command(cmd=f"{pip_cmd} install --upgrade pip")
+
+        node.exec_command(
+            cmd=f"{pip_cmd} install "
+            + f"-r {config['test_folder']}/ceph-qe-scripts/rgw/requirements.txt"
+        )
+
+
+def run_mkfs(**kw):
+    """Create fs on a raw device using mkfs.
+
+    Args:
+        type: ext4/xfs
+        device_name: name of the device on which fs needs to be created.
+    """
+
+    long_running = kw.get("long_running", True)
+    cmd = f"mkfs -t {kw.get('type', 'xfs')} {kw.get('device_name')}"
+
+    return kw["client_node"].exec_command(cmd=cmd, long_running=long_running, sudo=True)
+
+
+def run_fio(**fio_args):
     """Run IO using fio tool on given target.
 
     Args:
-        filename: Target device or file.
+        device_name: Target device
+        filename: <path>/<file_name> or <path>
+                  if only directory is given, then a file with name "file"
+                  will be created and data written into it.
         rbdname: rbd image name
         pool: name of rbd image pool
         runtime: fio runtime
         long_running(bool): True for long running required
-
+        client_node: node where fio needs to be run
+        size: 'size' for file size/io size
+        cmd_timeout: command timeout in seconds eg., 'notimeout' | 1200
+        no_run_time: None | no_runtime
     Prerequisite: fio package must have been installed on the client node.
+    One of device_name, filename, (rbdname,pool) is required.
     """
-    sudo = False
-    if kw.get("filename"):
-        opt_args = f"--filename={kw['filename']}"
-        sudo = True
+    log.debug(f"Config Received for fio: {fio_args}")
+    cmd_args = {}
+    if fio_args.get("filename"):
+        file_name = fio_args["filename"]
+        if os.path.isdir(file_name):
+            file_name = f"{file_name}/file"
+        cmd_args.update({"filename": file_name})
+
+    elif fio_args.get("device_name"):
+        cmd_args.update({"ioengine": "libaio", "filename": fio_args["device_name"]})
+
     else:
-        opt_args = (
-            f"--ioengine=rbd --rbdname={kw['image_name']} --pool={kw['pool_name']}"
+        cmd_args.update(
+            {
+                "ioengine": "rbd",
+                "rbdname": fio_args["image_name"],
+                "pool": fio_args["pool_name"],
+            }
         )
 
-    opt_args += f" --runtime={kw.get('runtime', 120)}"
+    if fio_args.get("size"):
+        cmd_args.update({"size": fio_args.get("size", "100M")})
 
-    long_running = kw.get("long_running", False)
-    cmd = (
-        "fio --name=test-1  --numjobs=1 --rw=write"
-        " --bs=1M --iodepth=8 --fsync=32  --time_based"
-        f" --group_reporting {opt_args}"
+    run_time = fio_args.get("run_time")
+
+    # Take default runtime only when size is not specified
+    # if size is mentioned then IOs should run till required size is filled
+    if not run_time and not fio_args.get("size"):
+        run_time = 120
+
+    if run_time == "no_runtime":
+        log.info("No runtime provided.")
+    elif run_time:
+        cmd_args.update({"runtime": run_time, "time_based": True})
+
+    if fio_args.get("rwmixread"):
+        cmd_args.update({"rwmixread": fio_args["rwmixread"]})
+
+    # add verify and verify_fatal for data corruption test
+    # e.g verify="crc32", verify_fatal=1
+    if fio_args.get("verify"):
+        cmd_args.update({"verify": fio_args["verify"]})
+
+    if fio_args.get("verify_fatal"):
+        cmd_args.update({"verify_fatal": fio_args["verify_fatal"]})
+
+    cmd_args.update(
+        {
+            "name": fio_args.get("test_name", "test-1"),
+            "numjobs": fio_args.get("num_jobs", "1"),
+            "rw": fio_args.get("io_type", "write"),
+            "iodepth": fio_args.get("iodepth", "8"),
+            "fsync": fio_args.get("fsync", "32"),
+            "group_reporting": True,
+            "bs": fio_args.get("bs", "4k"),
+        }
     )
 
-    return kw["client_node"].exec_command(cmd=cmd, long_running=long_running, sudo=sudo)
+    output_fmt = fio_args.get("output_format")
+    if output_fmt:
+        fio_file = f"{cmd_args['name']}_{output_fmt}"
+        if fio_args.get("output_dir"):
+            fio_file = f"{fio_args['output_dir']}/{fio_file}"
+        cmd_args.update({"output-format": output_fmt, "output": fio_file})
+
+    # Execute FIO
+    exec_args = {
+        "cmd": f"fio {config_dict_to_string(cmd_args)}",
+        "long_running": fio_args.get("long_running", False),
+        "sudo": True,
+    }
+
+    if fio_args.get("get_time_taken"):
+        exec_args["cmd"] = f"time {exec_args['cmd']}"
+    if fio_args.get("cmd_timeout"):
+        exec_args.update({"timeout": fio_args["cmd_timeout"]})
+
+    out = fio_args["client_node"].exec_command(**exec_args)
+    if output_fmt:
+        return cmd_args["output"]
+    return out
 
 
 def fetch_image_tag(rhbuild):
@@ -1479,3 +2153,313 @@ def fetch_image_tag(rhbuild):
         raise TestSetupFailure("Not a live testing")
     except Exception as e:
         raise TestSetupFailure(f"Could not fetch image tag : {e}")
+
+
+def validate_conf(conf):
+    """
+    Validates the global conf by checking unique ID for nodes.
+
+    Rules:
+    1. If id is provided, then it will take the highest precedence.
+    2. If id not provided, then framework will add the node IDs based on its appearance index.
+
+    Note : ID should not follow node{i} which will conflict with the dynamic ID generator. like node1,node2..etc
+    """
+    log.info("Validate global configuration file")
+    for cluster in conf.get("globals"):
+        nodes = cluster.get("ceph-cluster").get("nodes", [])
+        if not nodes:
+            nodes_id = []
+            ceph_cluster = cluster.get("ceph-cluster")
+            for node in sorted(ceph_cluster.keys()):
+                if not node.startswith("node"):
+                    continue
+                nodes_id.append(ceph_cluster[node].get("id") or f"{node}")
+        else:
+            nodes_id = [
+                node.get("id") or f"node{idx+1}" for idx, node in enumerate(nodes)
+            ]
+        log.info(f"List of Node IDs : {nodes_id}")
+        if not (len(nodes_id) == len(set(nodes_id))):
+            raise TestSetupFailure(
+                f"Nodes does not have Unique Identifiers, "
+                f"Please set the unique node Ids in global conf {validate_conf.__doc__}"
+            )
+
+
+def get_storage_stats(client, pool_name=None):
+    """
+    Gets the storage stats for ceph cluster and pools
+    if pool_name is specified then it will return stats of the pool alone
+    Cluster sample Stats:
+    "stats": {
+                "total_bytes": 227010009890816,
+                "total_avail_bytes": 202728810860544,
+                "total_used_bytes": 24281199030272,
+                "total_used_raw_bytes": 24281199030272,
+                "total_used_raw_ratio": 0.10696091502904892,
+                "num_osds": 106,
+                "num_per_pool_osds": 99,
+                "num_per_pool_omap_osds": 99
+        }
+        Pool Sample Stats:
+        "stats": {
+                        "stored": 17594970,
+                        "objects": 87,
+                        "kb_used": 17183,
+                        "bytes_used": 17594970,
+                        "percent_used": 1.3443361979170732e-07,
+                        "max_avail": 43627401183232
+                }
+    """
+    out, rc = client.exec_command(sudo=True, cmd="ceph df -f json")
+    df = json.loads(out)
+    if pool_name:
+        for pool in df.get("pools"):
+            if pool_name == pool.get("name"):
+                return pool.get("stats")
+    return df.get("stats")
+
+
+def convert_bytes(total, unit):
+    """
+    Converts the bytes to specified units
+    agrs:
+     total : bytes
+     unit : mb,gb,tb
+    """
+    unit_dict = {"mb": 2, "gb": 3, "tb": 4}
+    return round(total / pow(1024, unit_dict.get(unit)))
+
+
+def get_smallfile_config(client, percentage, pool_name):
+    cluster_stats = get_storage_stats(client)
+    total_size_in_gb = convert_bytes(cluster_stats.get("total_bytes"), "gb")
+    out, rc = client.exec_command(
+        sudo=True, cmd=f"ceph osd pool get {pool_name} size -f json"
+    )
+    pool = json.loads(out)
+    pool_size = pool.get("size")
+    total_space_to_fill = total_size_in_gb * 0.01 * (percentage / pool_size)
+    if total_space_to_fill > 10:
+        return {
+            "file_size": 1024,
+            "threads": 10,
+            "files": 1024,
+            "iterations": round(total_space_to_fill / 10),
+        }
+    return {"file_size": 1024, "threads": total_space_to_fill, "files": 1024}
+
+
+def validate_image(conf, cloud_type):
+    """Validate the global conf for image_name.
+
+    This module validates the global conf, by checking if the user has provided image-name.
+    If image-name key is provided, then it should have the specific image specified along with it.
+
+    Note:
+        for psi based, "openstack" is the key, followed by required image name, similarly, "ibmc" for ibmc env.
+        This check is required with the introduction of multi-version ceph clients.
+
+    Args:
+        conf (dict): cluster global configuration provided
+        cloud_type (str): underlying deployment infrastructure used
+
+    example::
+      node7:
+        image-name:
+          openstack: RHEL-8.6.0-x86_64-ga-latest
+          ibmc: rhel-86-server-released
+    """
+    log.info("Validate global configuration file")
+    if cloud_type == "baremetal":
+        return
+    for cluster in conf.get("globals"):
+        nodes = cluster.get("ceph-cluster")
+        for node in nodes.keys():
+            if "node" in node:
+                attrs = nodes[node].get("image-name")
+                if attrs:
+                    log.info(f"Image attributes provided for node {node} : {attrs} ")
+                    if cloud_type not in attrs.keys():
+                        raise TestSetupFailure(
+                            f"Node {node} has image-name provided , but no corresponding image given for {cloud_type} "
+                            f"Please set the {cloud_type}:image in global conf {validate_image.__doc__}"
+                        )
+
+
+def save_client_config_keyring(**kw):
+    """
+    retrieve a user, key, and capabilities and then save the user to a client keyring file
+
+    Args:
+        client_node: node where command needs to be run
+        client_id: id of client which configuration need to save
+        **kw: Any other optional arguement
+
+    Returns:
+        exec_cmd response
+    """
+    return kw["client_node"].exec_command(
+        cmd=f"sudo ceph auth get {kw['client_id']} -o /etc/ceph/ceph.{kw['client_id']}.keyring"
+    )
+
+
+def get_sync_status(node):
+    log.info("getting sync status")
+    out, err = node.exec_command(cmd="sudo radosgw-admin sync status")
+    log.info(out)
+    return out
+
+
+def get_bucket_sync_status(node, bucket_name):
+    log.info("getting bucket sync status")
+    out, err = node.exec_command(
+        cmd=f"sudo radosgw-admin bucket sync status --bucket={bucket_name}"
+    )
+    log.info(out)
+    return out
+
+
+def get_ceph_version_from_cluster(client):
+    """
+    Retrieve the Ceph version installed on a cluster using the provided client.
+
+    Args:
+        client : An instance of the client used for executing commands.
+
+    Returns:
+        str or None: The Ceph version if installed, or None if Ceph is not installed.
+
+    Raises:
+        ValueError: If the JSON output does not contain the expected version information.
+    """
+    out, rc = client.exec_command(
+        sudo=True,
+        cmd="ceph version -f json",
+        check_ec=False,
+    )
+    log.info(out)
+    ceph_version = json.loads(out)
+    version_string = ceph_version.get("version", None)
+    log.info(version_string)
+    if not version_string:
+        log.error("Ceph is not installed please install ceph")
+        return None
+    version_pattern = r"ceph version (\S+).*"
+    match = re.search(version_pattern, version_string)
+    re.search(version_pattern, version_string)
+    if not match:
+        raise RuntimeError("Failed to get ceph version from cluster")
+    ceph_version_installed = match.group(1)
+    return ceph_version_installed
+
+
+def get_ceph_version_from_repo(client, config):
+    """
+    Install Ceph and retrieve the version from the specified repository.
+
+    Args:
+        client (YourClientType): An instance of the client used for executing commands.
+        config (dict): Configuration parameters including 'rhbuild', 'base_url', and 'env_type'.
+
+    Returns:
+        str: The Ceph version retrieved from the repository.
+
+    Raises:
+        RuntimeError: If mandatory parameters are missing or the platform is unsupported.
+    """
+    podman_run = "podman run -it --rm"
+    rhel8_ubi_image = "registry.access.redhat.com/ubi8/ubi"
+    rhel9_ubi_image = "registry.access.redhat.com/ubi9/ubi"
+    exec_cmd = "sh -c"
+    yum_add_repo = "dnf config-manager --add-repo"
+    curl_add_repo = "curl -L -o /etc/yum.repos.d/upstream.repo"
+    ibm_license = (
+        "yum install --nogpgcheck -y ibm-storage-ceph-license && "
+        "touch /usr/share/ibm-storage-ceph-license/accept"
+    )
+    install_ceph_common = "yum install ceph-common -q --nogpgcheck -y"
+
+    # Define command arguments
+    cmd_args = [podman_run]
+
+    # Get rhel version
+    platform = config.get("rhbuild")
+    if not platform:
+        raise RuntimeError("Mandatory parameter 'platform' does not exist")
+    elif "rhel-9" in platform:
+        cmd_args.append(rhel9_ubi_image)
+    elif "rhel-8" in platform:
+        cmd_args.append(rhel8_ubi_image)
+    else:
+        raise RuntimeError(f"Unsupported platform '{platform}'")
+
+    # Get ceph repo
+    rhs_ceph_repo = config.get("base_url")
+    if not rhs_ceph_repo:
+        raise RuntimeError("rhs_ceph_repo does not exist")
+
+    # Check for rhs ceph repo
+    env_type = config.get("env_type", "RH")
+
+    # Check for Redhat build
+    if env_type == "RH" and not rhs_ceph_repo.endswith(".repo"):
+        rhs_ceph_repo += "/compose/Tools/x86_64/os"
+
+    if env_type.lower() == "upstream":
+        yum_cmd_args = [f"{curl_add_repo} {rhs_ceph_repo}"]
+    else:
+        yum_cmd_args = [f"{yum_add_repo} {rhs_ceph_repo}"]
+
+    # Check for IBM build
+    if env_type == "IBM":
+        yum_cmd_args.append(ibm_license)
+
+    # Add install package command
+    yum_cmd_args.append(install_ceph_common)
+
+    # Get package install command
+    yum_cmd_args = " && ".join(yum_cmd_args)
+
+    # Get final command
+    cmd_args.extend([exec_cmd, f'"{yum_cmd_args}"'])
+    cmd_args = " ".join(cmd_args)
+    out, rc = client.exec_command(
+        sudo=True,
+        cmd=f"{cmd_args}",
+        check_ec=False,
+    )
+    log.info(out)
+    build_match = re.search(r"ceph-common-\d+:(\d+\.\d+\.\d+-\d+.el\dcp).*", out)
+    if not build_match:
+        raise RuntimeError(f"Failed to get ceph version from url {rhs_ceph_repo}")
+    ceph_version = build_match.group(1)
+    return ceph_version
+
+
+def find_free_port(host):
+    find_port = """
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind((\'localhost\', {PORT_NUMBER}))
+try:
+    _, port = s.getsockname()
+except:
+    port = None
+finally:
+    s.close()
+print(port)
+"""
+    for port in range(6000, 10000):
+        out, _ = host.exec_command(
+            cmd=f'python3 -c "{find_port.format(PORT_NUMBER=port)}"',
+            sudo=True,
+        )
+        if not out or out == "None":
+            continue
+        return out.strip()
+
+
+def log_json_dump(data):
+    return json.dumps(data, indent=4)

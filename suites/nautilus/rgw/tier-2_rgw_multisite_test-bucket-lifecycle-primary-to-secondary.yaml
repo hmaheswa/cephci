@@ -25,7 +25,15 @@ tests:
               ceph_stable_rh_storage: True
               fetch_directory: ~/fetch
               copy_admin_key: true
-              dashboard_enabled: False
+              dashboard_enabled: true
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
               rgw_multisite: true
               rgw_zone: US_EAST
               rgw_zonegroup: US
@@ -51,7 +59,15 @@ tests:
               ceph_stable_rh_storage: True
               fetch_directory: ~/fetch
               copy_admin_key: true
-              dashboard_enabled: False
+              dashboard_enabled: true
+              dashboard_admin_user: admin
+              dashboard_admin_password: p@ssw0rd
+              grafana_admin_user: admin
+              grafana_admin_password: p@ssw0rd
+              node_exporter_container_image: registry.redhat.io/openshift4/ose-prometheus-node-exporter:v4.6
+              grafana_container_image: registry.redhat.io/rhceph/rhceph-4-dashboard-rhel8:4
+              prometheus_container_image: registry.redhat.io/openshift4/ose-prometheus:v4.6
+              alertmanager_container_image: registry.redhat.io/openshift4/ose-prometheus-alertmanager:v4.6
               rgw_multisite: true
               rgw_zone: US_WEST
               rgw_zonegroup: US
@@ -91,7 +107,7 @@ tests:
         ceph-rgw1:
           config:
             config-file-name: test_lc_rule_prefix_and_tag.yaml
-            script-name: test_bucket_lifecycle_object_expiration.py
+            script-name: test_bucket_lifecycle_object_expiration_transition.py
             timeout: 300
       desc: test_lifecycle  on secondary with AND rule filter
       module: sanity_rgw_multisite.py
@@ -105,6 +121,6 @@ tests:
       clusters:
         ceph-rgw1:
           config:
-            script-name: test_bucket_lifecycle_object_expiration.py
+            script-name: test_bucket_lifecycle_object_expiration_transition.py
             config-file-name: test_lc_rule_prefix_non_current_days.yaml
             timeout: 300

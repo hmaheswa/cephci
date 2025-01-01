@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import random
 import string
@@ -8,6 +9,15 @@ from tests.cephfs.cephfs_utilsV1 import FsUtils
 from utility.log import Log
 
 log = Log(__name__)
+
+
+def get_clone_status(client, fs_util, clone):
+    cmd_out, cmd_rc = fs_util.get_clone_status(
+        client, clone["vol_name"], clone["target_subvol_name"]
+    )
+    status = json.loads(cmd_out)
+    log.info(f"{clone['target_subvol_name']} status is {status['status']['state']}")
+    return status["status"]["state"]
 
 
 def run(ceph_cluster, **kw):
@@ -64,8 +74,13 @@ def run(ceph_cluster, **kw):
     3. ceph fs subvolumegroup rm <vol_name> <group_name>
     """
     try:
-
-        fs_util = FsUtils(ceph_cluster)
+        test_data = kw.get("test_data")
+        fs_util = FsUtils(ceph_cluster, test_data=test_data)
+        erasure = (
+            FsUtils.get_custom_config_value(test_data, "erasure")
+            if test_data
+            else False
+        )
         config = kw.get("config")
         clients = ceph_cluster.get_ceph_objects("client")
         build = config.get("build", config.get("rhbuild"))
@@ -77,15 +92,23 @@ def run(ceph_cluster, **kw):
                 f"This test requires minimum 1 client nodes.This has only {len(clients)} clients"
             )
             return 1
-        default_fs = "cephfs"
+        log.info("setting 'snapshot_clone_no_wait' to false")
+        clients[0].exec_command(
+            sudo=True,
+            cmd="ceph config set mgr mgr/volumes/snapshot_clone_no_wait false",
+        )
+        default_fs = "cephfs" if not erasure else "cephfs-ec"
         mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
         )
         client1 = clients[0]
-        fs_details = fs_util.get_fs_info(client1)
+        fs_details = fs_util.get_fs_info(client1, default_fs)
+        rmclone_list = [
+            {"vol_name": default_fs, "subvol_name": f"clone_{x}"} for x in range(1, 6)
+        ]
         if not fs_details:
-            fs_util.create_fs(client1, "cephfs")
+            fs_util.create_fs(client1, default_fs)
         subvolumegroup = {"vol_name": default_fs, "group_name": "subvolgroup_1"}
         fs_util.create_subvolumegroup(client1, **subvolumegroup)
         subvolume = {
@@ -104,7 +127,7 @@ def run(ceph_cluster, **kw):
         fs_util.fuse_mount(
             [client1],
             fuse_mounting_dir_1,
-            extra_params=f" -r {subvol_path.strip()}",
+            extra_params=f" -r {subvol_path.strip()} --client_fs {default_fs}",
         )
         client1.exec_command(
             sudo=True,
@@ -138,15 +161,13 @@ def run(ceph_cluster, **kw):
         while status_list.count("complete") < len(clone_list):
             status_list.clear()
             iteration += 1
-            for clone in clone_list:
-                cmd_out, cmd_rc = fs_util.get_clone_status(
-                    client1, clone["vol_name"], clone["target_subvol_name"]
-                )
-                status = json.loads(cmd_out)
-                status_list.append(status["status"]["state"])
-                log.info(
-                    f"{clone['target_subvol_name']} status is {status['status']['state']}"
-                )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [
+                    executor.submit(get_clone_status, client1, fs_util, clone)
+                    for clone in clone_list
+                ]
+            status_list = [f.result() for f in futures]
+            print(status_list)
             if status_list.count("in-progress") > 4:
                 return 1
             else:
@@ -158,39 +179,41 @@ def run(ceph_cluster, **kw):
         rmclone_list = [
             {"vol_name": default_fs, "subvol_name": f"clone_{x}"} for x in range(1, 6)
         ]
+        rmclone_cancel_list = [
+            {"vol_name": default_fs, "clone_name": f"clone_{x}"} for x in range(1, 6)
+        ]
         for clonevolume in rmclone_list:
             fs_util.remove_subvolume(client1, **clonevolume)
         log.info("Set clone threads to 2 and verify only 2 clones are in progress")
         client1.exec_command(
             sudo=True, cmd="ceph config set mgr mgr/volumes/max_concurrent_clones 2"
         )
-        for clone in clone_list:
-            fs_util.create_clone(client1, **clone)
+        with parallel() as p:
+            for clone in clone_list:
+                p.spawn(fs_util.create_clone, client1, **clone, validate=False)
         status_list = []
         iteration = 0
         while status_list.count("complete") < len(clone_list):
             iteration += 1
             status_list.clear()
-            for clone in clone_list:
-                cmd_out, cmd_rc = fs_util.get_clone_status(
-                    client1, clone["vol_name"], clone["target_subvol_name"]
-                )
-                status = json.loads(cmd_out)
-                status_list.append(status["status"]["state"])
-                log.info(
-                    f"{clone['target_subvol_name']} status is {status['status']['state']}"
-                )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [
+                    executor.submit(get_clone_status, client1, fs_util, clone)
+                    for clone in clone_list
+                ]
+            status_list = [f.result() for f in futures]
+            print(status_list)
             if status_list.count("in-progress") > 2:
                 return 1
             else:
                 log.info(
-                    f"cloneing is in progress for {status_list.count('in-progress')} out of {len(clone_list)}"
+                    f"cloning is in progress for {status_list.count('in-progress')} out of {len(clone_list)}"
                 )
             log.info(f"Iteration {iteration} has been completed")
         return 0
     except Exception as e:
-        log.info(e)
-        log.info(traceback.format_exc())
+        log.error(e)
+        log.error(traceback.format_exc())
         return 1
 
     finally:
@@ -198,8 +221,21 @@ def run(ceph_cluster, **kw):
         client1.exec_command(
             sudo=True, cmd="ceph config set mgr mgr/volumes/max_concurrent_clones 4"
         )
-        for clonevolume in rmclone_list:
-            fs_util.remove_subvolume(client1, **clonevolume, force=True, validate=False)
+        log.info("setting 'snapshot_clone_no_wait' to true")
+        clients[0].exec_command(
+            sudo=True, cmd="ceph config set mgr mgr/volumes/snapshot_clone_no_wait true"
+        )
+        if locals().get("rmclone_cancel_list", None):
+            for clonevolume in rmclone_cancel_list:
+                fs_util.clone_cancel(
+                    client1, **clonevolume, force=True, validate=False, check_ec=False
+                )
+
+        if locals().get("rmclone_list", None):
+            for clonevolume in rmclone_list:
+                fs_util.remove_subvolume(
+                    client1, **clonevolume, force=True, validate=False, check_ec=False
+                )
         log.info("Clean Up in progess")
-        fs_util.remove_snapshot(client1, **snapshot)
-        fs_util.remove_subvolume(client1, **subvolume)
+        fs_util.remove_snapshot(client1, **snapshot, validate=False, check_ec=False)
+        fs_util.remove_subvolume(client1, **subvolume, validate=False, check_ec=False)

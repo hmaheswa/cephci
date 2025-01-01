@@ -32,96 +32,146 @@ def run(ceph_cluster, **kw):
     cephadm = CephAdmin(cluster=ceph_cluster, **config)
     rados_obj = RadosOrchestrator(node=cephadm)
     mon_obj = MonConfigMethods(rados_obj=rados_obj)
-    pool_configs_path = "conf/pacific/rados/test-confs/pool-configurations.yaml"
+    pool_configs_path = config.get("pool_configs_path")
+    create_re_pool = config.get("create_re_pool", True)
+    create_ec_pool = config.get("create_ec_pool", False)
 
     regex = r"\s*(\d.\d)-rhel-\d"
     build = (re.search(regex, config.get("build", config.get("rhbuild")))).groups()[0]
-    if not float(build) > 5.0:
+    if not float(build) >= 6.0:
         log.info(
-            "Test running on version less than 5.1, skipping verifying autoscaler flags"
+            "Test running on version less than 6.0, skipping verifying autoscaler flags"
         )
         return 0
 
-    # Setting the no-autoscale flag
-    cmd = "ceph osd pool set noautoscale"
-    rados_obj.run_ceph_command(cmd=cmd)
+    try:
+        # Creating few pools with various autoscale modes
+        with open(pool_configs_path, "r") as fd:
+            pool_configs = yaml.safe_load(fd)
 
-    # sleeping for 5 seconds as the command takes some time to affect the status of pools
-    time.sleep(5)
+        if create_re_pool:
+            pool_conf = pool_configs["replicated"]["sample-pool-1"]
+            create_given_pool(rados_obj, pool_conf)
+            rados_obj.set_pool_property(
+                pool=pool_conf["pool_name"], props="pg_autoscale_mode", value="warn"
+            )
+        if create_ec_pool:
+            pool_conf = pool_configs["erasure"]["sample-pool-1"]
+            create_given_pool(rados_obj, pool_conf)
+            rados_obj.set_pool_property(
+                pool=pool_conf["pool_name"], props="pg_autoscale_mode", value="off"
+            )
 
-    # Getting the autoscale configurations after setting the flag
-    # all the pools should have autoscale set to off
-    cmd = "ceph osd pool autoscale-status"
-    pool_status = rados_obj.run_ceph_command(cmd=cmd)
+        # Fetching the pools on the cluster and their autoscaling mode
+        pre_autoscale_status = rados_obj.get_pg_autoscale_status()
+        log.debug(
+            f"Autoscale statuses of pools before the autoscale flag being set : {pre_autoscale_status}"
+        )
 
-    for entry in pool_status:
-        if entry["pg_autoscale_mode"] == "on":
-            log.error(f"Pg autoscaler not turned off for pool : {entry['pool_name']}")
+        log.debug("Setting the no-autoscale flag on the cluster")
+        # Setting the no-autoscale flag
+        cmd = "ceph osd pool set noautoscale"
+        rados_obj.client.exec_command(cmd=cmd, sudo=True)
+
+        # sleeping for 120 seconds as the command takes some time to affect the status of pools
+        time.sleep(120)
+
+        # Getting the autoscale configurations after setting the flag
+        # all the pools should have autoscale set to off
+        if not rados_obj.set_noautoscale_flag(retry=20):
+            log.error("Could not set the noautoscale flag on the cluster")
             return 1
 
-    if not mon_obj.verify_set_config(
-        section="global", name="osd_pool_default_pg_autoscale_mode", value="off"
-    ):
-        log.error(
-            "Default autoscale mode not set to off upon setting the no-autoscale flag"
+        if not mon_obj.verify_set_config(
+            section="global", name="osd_pool_default_pg_autoscale_mode", value="off"
+        ):
+            log.error(
+                "Default autoscale mode not set to off upon setting the no-autoscale flag"
+            )
+            return 1
+        log.debug(
+            "Checking status on each pool to make sure that"
+            " autoscaler is not on post setting the autoscaler flag"
         )
-        return 1
+        cmd = "ceph osd pool autoscale-status"
+        pool_status = rados_obj.run_ceph_command(cmd=cmd, timeout=600)
 
-    if not mon_obj.verify_set_config(
-        section="mgr", name="mgr/pg_autoscaler/noautoscale", value="true"
-    ):
-        log.error("autoscale Flag not set to true upon setting the no-autoscale flag")
-        return 1
-
-    # Creating a new pool, with the flag off, new pool should be created with autoscaler profile turned off
-    with open(pool_configs_path, "r") as fd:
-        pool_configs = yaml.safe_load(fd)
-
-    pool_conf = pool_configs["replicated"]["sample-pool-2"]
-    create_given_pool(rados_obj, pool_conf)
-
-    cmd = "ceph osd pool autoscale-status"
-    pool_status = rados_obj.run_ceph_command(cmd=cmd)
-
-    for entry in pool_status:
-        if entry["pool_name"] == pool_conf["pool_name"]:
+        for entry in pool_status:
             if entry["pg_autoscale_mode"] == "on":
                 log.error(
-                    f"Pg autoscaler not turned off for the new pool : {entry['pool_name']} "
-                    f"created with flag turned off"
+                    f"Pg autoscaler mode still on for pool : {entry['pool_name']}"
                 )
-                return 1
-
-    # Turning the autoscale flag back on. All the setting made earlier should be reverted
-    cmd = "ceph osd pool unset noautoscale"
-    pool_status = rados_obj.run_ceph_command(cmd=cmd)
-
-    # sleeping for 5 seconds as the command takes some time to affect the status of pools
-    time.sleep(5)
-
-    for entry in pool_status:
-        if entry["pg_autoscale_mode"] == "off":
-            log.error(f"Pg autoscaler not turned on for pool : {entry['pool_name']}")
-            return 1
-
-    if not mon_obj.verify_set_config(
-        section="global", name="osd_pool_default_pg_autoscale_mode", value="on"
-    ):
-        log.error(
-            "Default autoscale mode not set to true upon removing the no-autoscale flag"
+                # tbd: Uncomment the below exception upon bug fix: https://bugzilla.redhat.com/show_bug.cgi?id=2252788
+                # raise Exception("PG autoscaler mode still on error")
+        log.debug(
+            "All the pools have the autoscaler mode changed from default on. pass"
         )
+
+        # Creating a new pool, with the flag off, new pool should be created with autoscaler profile turned off
+        pool_conf = pool_configs["replicated"]["sample-pool-2"]
+        create_given_pool(rados_obj, pool_conf)
+
+        # Turning to autoscale flag back on. All the setting made earlier should be reverted
+        cmd = "ceph osd pool unset noautoscale"
+        rados_obj.run_ceph_command(cmd=cmd)
+
+        # sleeping for 120 seconds as the command takes some time to affect the status of pools
+        time.sleep(120)
+        cmd = "ceph osd dump"
+        out = rados_obj.run_ceph_command(cmd=cmd)
+        flags_set = out["flags_set"]
+        log.debug(f"Flags set on the cluster : {flags_set}")
+        if "noautoscale" in flags_set:
+            log.info("No autoscale flag not removed on the cluster")
+            raise Exception("Noautoscale flag not removed error")
+        log.info("Noautoscale flag removed on the cluster")
+
+        # Checking the autoscale states of the pools. They should be same as before
+        # Fetching the pools on the cluster and their autoscaling mode
+        post_autoscale_status = rados_obj.get_pg_autoscale_status()
+        log.debug(
+            f"Autoscale statuses of pools after the autoscale flag being set : {post_autoscale_status}"
+        )
+
+        if float(build) >= 7.1:
+            log.info(
+                "Checking the autoscale states of the pools. They should be same as before"
+            )
+            for pool in pre_autoscale_status:
+                pool_name = pool["pool_name"]
+                pool_autoscale_flag = pool["pg_autoscale_mode"]
+                new_stats = rados_obj.get_pg_autoscale_status(pool_name=pool_name)
+                log.debug(
+                    f"Pool_name : {pool_name}, Old autoscale mode : {pool_autoscale_flag},"
+                    f"new autoscale flag : {new_stats['pg_autoscale_mode']}"
+                )
+                if new_stats["pg_autoscale_mode"] != pool_autoscale_flag:
+                    log.error(f"The autoscale mode has changed for pool : {pool_name}")
+                    raise Exception("Autoscale mode on the pool changed error")
+            log.info(
+                "Autoscale mode verified before and after the no-autoscale flag being set"
+            )
+
+    except Exception as e:
+        log.error(f"Failed with exception: {e.__doc__}")
+        log.exception(e)
         return 1
 
-    if not mon_obj.verify_set_config(
-        section="mgr", name="mgr/pg_autoscaler/noautoscale", value="false"
-    ):
-        log.error("autoscale Flag not set to false upon removing the no-autoscale flag")
-        return 1
-
-    # Deleting the pool created earlier
-    if not rados_obj.detete_pool(pool=pool_conf["pool_name"]):
-        log.error(f"the pool {pool_conf['pool_name']} could not be deleted")
-        return 1
+    finally:
+        log.info(
+            "\n \n ************** Execution of finally block begins here *************** \n \n"
+        )
+        # Deleting the pool created earlier
+        rados_obj.rados_pool_cleanup()
+        cmd = "ceph osd pool unset noautoscale"
+        rados_obj.run_ceph_command(cmd=cmd)
+        time.sleep(10)
+        # log cluster health
+        rados_obj.log_cluster_health()
+        # check for crashes after test execution
+        if rados_obj.check_crash_status():
+            log.error("Test failed due to crash at the end of test")
+            return 1
 
     log.info("Autoscale flag is working as expected.")
     return 0

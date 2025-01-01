@@ -10,11 +10,13 @@
         ceph-ci             1 week
         ceph-core           1 weeks
 """
+
 import smtplib
 import sys
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from types import SimpleNamespace
 from typing import Dict
 
 import yaml
@@ -85,7 +87,12 @@ def cleanup(
     Returns:
         None
     """
-    user_ = osp_identity.get_user(node.extra["userId"])
+    try:
+        user_ = osp_identity.get_user(node.extra["userId"])
+    except Exception as e:
+        print(f"For Node:{node.name} unable to find the owner {e}")
+        user_ = SimpleNamespace(name="No_USER", email="cephci@redhat.com")
+
     if node.state.lower() != "error":
         node_age = datetime.now(timezone.utc) - node.created_at
         max_age = 7 if tenant != "ceph-jenkins" else 3
@@ -153,9 +160,9 @@ def send_email(payload: Dict) -> list:
             recipient = email
 
             msg = MIMEMultipart("alternative")
-            msg[
-                "Subject"
-            ] = "Notification: Your subscriptions are marked/removed in RHOS-D"
+            msg["Subject"] = (
+                "Notification: Your subscriptions are marked/removed in RHOS-D"
+            )
             msg["From"] = sender
             msg["To"] = recipient
             html = """\
@@ -222,7 +229,7 @@ def run(args: Dict) -> int:
 
         results = dict()
 
-        tenants = ["ceph-ci", "ceph-core", "ceph-jenkins"]
+        tenants = ["ceph-ci", "ceph-core", "ceph-jenkins", "ceph-perf"]
         for tenant in tenants:
             driver_ = get_driver(Provider.OPENSTACK)
             osp_driver = driver_(

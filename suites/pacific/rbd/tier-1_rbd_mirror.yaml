@@ -16,8 +16,7 @@
 #     Node4 - OSD
 #     Node5 - OSD
 #     Node6 - RBD Mirror
-
-
+#
 # The following evaluations are carried out
 #   (1) Configures RBD Mirroring on cephadm
 #   (2) Creates Pool Image and enables Mirroring

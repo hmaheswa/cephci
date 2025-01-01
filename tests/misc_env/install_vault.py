@@ -23,6 +23,7 @@ ToDo:
   - support TLS
   - support token auth method
 """
+
 from json import loads
 from typing import Dict
 
@@ -156,6 +157,7 @@ def _install_agent(cluster: Ceph, config: Dict) -> None:
     Args:
         cluster     Ceph cluster participating in the test
         config      key/value pairs useful for customization
+        vault_cfg   Vault configuration parameters
 
     Returns:
         None
@@ -177,6 +179,7 @@ def _install_vault_packages(node: CephNode) -> None:
 
     Args:
         node    The system on which the package needs to be installed
+        config  Config passed from CI, mainly needed for OS version
 
     Returns:
         None
@@ -184,10 +187,10 @@ def _install_vault_packages(node: CephNode) -> None:
     Raises:
         CommandFailed
     """
-    vault_repo = "https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo"
-    commands = [f"yum-config-manager --add-repo {vault_repo}", "yum install -y vault"]
-    for command in commands:
-        node.exec_command(sudo=True, cmd=command, check_ec=False)
+    wget_cmd = "curl -o /etc/yum.repos.d/hashicorp.repo http://magna002.ceph.redhat.com/cephci-jenkins/hashicorp.repo"
+    node.exec_command(sudo=True, cmd=wget_cmd, check_ec=False)
+    install_vault_cmd = "yum install -y vault"
+    node.exec_command(sudo=True, cmd=install_vault_cmd, check_ec=False)
 
 
 def _create_agent_config(node: CephNode, config: Dict) -> None:
@@ -291,17 +294,24 @@ def _configure_rgw_daemons(node: CephNode, config: Dict) -> None:
         ("rgw_crypt_s3_kms_backend", "vault"),
         ("rgw_crypt_vault_secret_engine", config["agent"]["engine"]),
         ("rgw_crypt_vault_auth", config["agent"]["auth"]),
+        ("rgw_crypt_sse_s3_backend", "vault"),
+        ("rgw_crypt_sse_s3_vault_secret_engine", config["agent"]["engine"]),
+        ("rgw_crypt_sse_s3_vault_auth", config["agent"]["auth"]),
     ]
 
     if config["agent"]["auth"] == "token":
         configs += [
             ("rgw_crypt_vault_token_file", config["agent"]["token_file"]),
             ("rgw_crypt_vault_addr", config["url"]),
+            ("rgw_crypt_sse_s3_vault_token_file", config["agent"]["token_file"]),
+            ("rgw_crypt_sse_s3_vault_addr", config["url"]),
         ]
     else:
         configs += [
             ("rgw_crypt_vault_prefix", config["agent"]["prefix"]),
             ("rgw_crypt_vault_addr", "http://127.0.0.1:8100"),
+            ("rgw_crypt_sse_s3_vault_prefix", config["agent"]["prefix"]),
+            ("rgw_crypt_sse_s3_vault_addr", "http://127.0.0.1:8100"),
         ]
 
     for daemon in rgw_daemons:

@@ -4,8 +4,12 @@ import json
 import random
 import string
 import time
+from importlib import import_module
+from typing import List
 
 from ceph.ceph import CommandFailed
+from ceph.parallel import parallel
+from ceph.utils import get_node_by_id
 from tests.rbd.exceptions import IOonSecondaryError
 from utility.log import Log
 
@@ -14,7 +18,6 @@ log = Log(__name__)
 
 class RbdMirror:
     def __init__(self, cluster, config):
-
         self.ceph_nodes = cluster
         self.k_m = config.get("ec-pool-k-m", None)
         self.ceph_version = int(config.get("rhbuild")[0])
@@ -36,9 +39,18 @@ class RbdMirror:
                 continue
 
         if self.ceph_version > 2 and self.k_m:
-            self.datapool = "rbd_datapool"
-            self.ec_profile = "rbd_ec_profile"
-            self.set_ec_profile(profile=self.ec_profile)
+            self.datapool = (
+                config["ec_pool_config"]["data_pool"]
+                if config.get("ec_pool_config", {}).get("data_pool")
+                else "rbd_test_data_pool_" + self.random_string()
+            )
+            if "," in self.k_m:
+                self.ec_profile = config.get("ec_pool_config", {}).get(
+                    "ec_profile", "rbd_ec_profile_" + self.random_string()
+                )
+                self.set_ec_profile(profile=self.ec_profile)
+            else:
+                self.ec_profile = ""
 
     def exec_cmd(self, **kw):
         try:
@@ -48,18 +60,29 @@ class RbdMirror:
             if kw.get("ceph_args", True):
                 cmd = cmd + self.ceph_args
 
-            out = node.exec_command(
+            if kw.get("long_running", False):
+                out = node.exec_command(
+                    sudo=True,
+                    cmd=cmd,
+                    long_running=True,
+                    check_ec=kw.get("check_ec", True),
+                )
+                return out
+
+            out, err = node.exec_command(
                 sudo=True,
                 cmd=cmd,
-                long_running=kw.get("long_running", False),
                 check_ec=kw.get("check_ec", True),
             )
+            log.info(f"Output of command {cmd}: {out}")
 
             if kw.get("output", False):
                 if isinstance(out, tuple):
                     return out[0]
                 return out
 
+            if kw.get("all", False):
+                return out, err
             return 0
 
         except CommandFailed:
@@ -113,7 +136,10 @@ class RbdMirror:
         )
 
     def mirror_daemon(self, enable=None, start=None, stop=None, restart=None):
-        """Enable, Start or Stop Rbd Mirror Daemon"""
+        """Enable, Start or Stop Rbd Mirror Daemon
+        Note: This method cannot be used for RHCS 4.x and beyond.
+        (For mirroring daemons configured using ceph-ansible/cephadm)
+        """
         if enable:
             self.exec_cmd(
                 ceph_args=False, cmd="systemctl enable ceph-rbd-mirror.target"
@@ -130,7 +156,7 @@ class RbdMirror:
 
     # Initial setup of mirroring host
     def setup_mirror(self, peer_cluster, **kw):
-        self.exec_cmd(ceph_args=False, cmd="yum install -y rbd-mirror")
+        """Exchanges conf file and keyring file and installs rbd-mirror daemon."""
 
         self.copy_file(
             file_name="/etc/ceph/{}.conf".format(peer_cluster.cluster_name),
@@ -157,28 +183,104 @@ class RbdMirror:
             dest=self.ceph_client,
         )
 
-        self.mirror_daemon(enable=True, start=True)
+        if not kw.get("daemon_configured"):
+            self.exec_cmd(ceph_args=False, cmd="yum install -y rbd-mirror")
+            self.mirror_daemon(enable=True, start=True)
 
     def config_mirror(self, peer_cluster, **kw):
+        """
+        Configure mirroring on RBD clusters based on the parameters provided
+        Args:
+            peer_cluster: peer_cluster object for the secondary RBD cluster
+            **kw:
+                poolname: poolname to be used for creating pool
+                mode: mirroring mode, pool or image to be used
+                way: one-way or two-way mirroring
+        """
         poolname = kw.get("poolname")
-        primary_cluster = "master"
-        secondary_cluster = "slave"
-        mode = kw.get("mode")
 
-        self.enable_mirroring("pool", poolname, mode=mode)
-        peer_cluster.enable_mirroring("pool", poolname, mode=mode)
+        # For failback to new cluster scenario,
+        # primary cluster will be newly added cluster
+        cluster_order = kw.get("custom_cluster_order", False)
+        if cluster_order:
+            clusters = kw["ceph_cluster_dict"].keys()
+            primary_cluster_name = list(clusters)[int(cluster_order.split(",")[0])]
+            secondary_cluster_name = list(clusters)[int(cluster_order.split(",")[1])]
+        else:
+            primary_cluster = kw.get("ceph_cluster")
+            primary_cluster_name = primary_cluster.name
+            secondary_cluster_name = [
+                cluster_name
+                for cluster_name in kw.get("ceph_cluster_dict").keys()
+                if cluster_name != primary_cluster_name
+            ][0]
+            secondary_cluster = kw.get("ceph_cluster_dict")[secondary_cluster_name]
+
+        mode = kw.get("mode")
+        peer_mode = kw.get("peer_mode")
+        rbd_client = kw.get("rbd_client")
+        build = kw.get("build")
+        wait_for_status = kw.get("wait_for_status", True)
+
+        self.enable_mirroring(mirror_level="pool", specs=poolname, mode=mode)
+        peer_cluster.enable_mirroring(mirror_level="pool", specs=poolname, mode=mode)
+
+        if kw.get("start_rbd_mirror_primary"):
+            time.sleep(60)
+            self.change_service_state(None, "start")
 
         if self.ceph_version >= 4:
-            self.bootstrap_peers(poolname=poolname, cluster_name=primary_cluster)
-            self.copy_file(
-                file_name="/root/bootstrap_token_master",
-                src=self.ceph_client,
-                dest=peer_cluster.ceph_client,
-            )
-            peer_cluster.import_bootstrap(
-                poolname=poolname, cluster_name=secondary_cluster
-            )
-
+            if peer_mode == "bootstrap":
+                self.bootstrap_peers(
+                    poolname=poolname, cluster_name=primary_cluster_name
+                )
+                self.copy_file(
+                    file_name="/root/bootstrap_token_primary",
+                    src=self.ceph_client,
+                    dest=peer_cluster.ceph_client,
+                )
+                peer_cluster.import_bootstrap(
+                    poolname=poolname, cluster_name=secondary_cluster_name
+                )
+            else:
+                primary_mon = ",".join(
+                    [
+                        obj.node.ip_address
+                        for obj in primary_cluster.get_ceph_objects(role="mon")
+                    ]
+                )
+                secondary_mon = ",".join(
+                    [
+                        obj.node.ip_address
+                        for obj in secondary_cluster.get_ceph_objects(role="mon")
+                    ]
+                )
+                primary_fsid = peer_cluster.ceph_nodes.get_cluster_fsid(build)
+                secondary_fsid = self.ceph_nodes.get_cluster_fsid(build)
+                secret = self.exec_cmd(
+                    cmd=f"ceph auth get-or-create {rbd_client}", output=True
+                )
+                secret = secret.split(" ")[-1].strip()
+                key_file_path = "/etc/ceph/secret_key"
+                self.exec_cmd(cmd=f"echo {secret} > {key_file_path}")
+                peer_cluster.exec_cmd(cmd=f"echo {secret} > {key_file_path}")
+                primary_cluster_spec = (
+                    f"{rbd_client}@{primary_fsid} --remote-mon-host {secondary_mon} "
+                    f"--remote-key-file {key_file_path}"
+                )
+                secondary_cluster_spec = (
+                    f"{rbd_client}@{secondary_fsid} --remote-mon-host {primary_mon} "
+                    f"--remote-key-file {key_file_path}"
+                )
+                if "one-way" in kw.get("way", ""):
+                    peer_cluster.peer_add(
+                        poolname=poolname, cluster_spec=secondary_cluster_spec
+                    )
+                else:
+                    self.peer_add(poolname=poolname, cluster_spec=primary_cluster_spec)
+                    peer_cluster.peer_add(
+                        poolname=poolname, cluster_spec=secondary_cluster_spec
+                    )
         else:
             if "one-way" in kw.get("way", ""):
                 peer_cluster.peer_add(poolname=poolname, cluster_spec=self.cluster_spec)
@@ -195,15 +297,102 @@ class RbdMirror:
         else:
             log.error("Peers were not added")
 
-        self.wait_for_status(poolname=poolname, health_pattern="OK")
-        peer_cluster.wait_for_status(poolname=poolname, health_pattern="OK")
+        # Waiting for OK pool mirror status to be okay based on user input as in image based
+        # mirorring status wouldn't reach OK without enabling mirroing on individual images
+        if wait_for_status:
+            self.wait_for_status(poolname=poolname, health_pattern="OK")
+            peer_cluster.wait_for_status(poolname=poolname, health_pattern="OK")
 
-    # Wait for required status
+    # configure initial mirroring steps
+    def initial_mirror_config(self, mirror2, poolname, imagename, **kw):
+        """
+        Calls create_pool function on both the clusters,
+        creates an image on primary cluster and configure the mirroring
+        waits for image to be present in secondary cluster with replying status
+        Args:
+            **kw:
+            mirror1 - primary cluster
+            mirror2 - secondary cluster
+            poolname - name for pool to be created on primary and secondary cluster
+            imagename - name of images created on primary and secondary cluster
+            imagesize - size of the image created
+            mode - mirror mode to be configured pool or image
+            mirrormode - type of mirror configured journal or snapshot
+        """
+        log.debug(
+            f"Config Recieved for initial mirror config: poolname:{poolname}, imagename:{imagename}\nkw:{kw}"
+        )
+        if kw.get("mirrormode") == "snapshot" and kw.get("mode") == "pool":
+            log.error("Invalid scenario for configuring mirror")
+            return 1
+
+        imagespec = poolname + "/" + imagename
+        imagesize = kw.get("imagesize")
+        io = kw.get("io_total")
+        with parallel() as p:
+            p.spawn(self.create_pool, poolname=poolname)
+            p.spawn(mirror2.create_pool, poolname=poolname)
+
+        self.create_image(imagespec=imagespec, size=imagesize)
+        if kw.get("mirrormode") != "snapshot" and "journaling" not in kw.get(
+            "image_feature", ""
+        ):
+            self.image_feature_enable(imagespec=imagespec, image_feature="journaling")
+        if kw.get("image_feature"):
+            self.image_feature_enable(
+                imagespec=imagespec, image_feature=kw["image_feature"]
+            )
+
+        if kw.get("mode"):
+            kw["peer_mode"] = kw.get("peer_mode", "bootstrap")
+            kw["rbd_client"] = kw.get("rbd_client", "client.admin")
+            if kw.get("mode") == "image":
+                kw["wait_for_status"] = False
+            self.config_mirror(mirror2, poolname=poolname, **kw)
+
+        # Enable image level mirroring only when mode is image type
+        if kw.get("mode") == "image":
+            mirrormode = kw.get("mirrormode", "")
+            self.enable_mirror_image(poolname, imagename, mirrormode)
+            self.wait_for_status(poolname=poolname, health_pattern="OK")
+            mirror2.wait_for_status(poolname=poolname, health_pattern="OK")
+
+        # TBD: We need to override wait_for_status to match images in cluster1==cluster2
+        # ITs failing here when the pool contains more than 1 image
+        # Using same image pool for replicated and ec pool
+        # mirror2.wait_for_status(poolname=poolname, images_pattern=1)
+
+        if kw.get("io_total"):
+            self.benchwrite(imagespec=imagespec, io=io)
+            time.sleep(60)
+        with parallel() as p:
+            p.spawn(
+                self.wait_for_status, imagespec=imagespec, state_pattern="up+stopped"
+            )
+            p.spawn(
+                mirror2.wait_for_status,
+                imagespec=imagespec,
+                state_pattern="up+replaying",
+            )
+
     def wait_for_status(self, **kw):
-        tout = datetime.timedelta(seconds=600)
+        """Wait for required mirror status of pool or image.
+
+        Args:
+            kw:
+            poolname: Name of the pool
+            imagespec: Image specification of the image of which status needs to be checked
+            state_pattern: Required mirror image state
+            description_pattern: Required mirror image description
+            retry_interval: sleep duration in between retries.
+            ignore_command_failure: true if command failure is to be ignored.
+        """
         starttime = datetime.datetime.now()
-        # Waiting for cluster to be aware of new event
-        time.sleep(20)
+        if kw.get("tout"):
+            tout = kw.get("tout")
+        else:
+            tout = datetime.timedelta(seconds=1200)
+        time.sleep(kw.get("retry_interval", 20))
         while True:
             if kw.get("poolname", False):
                 if kw.get("health_pattern"):
@@ -226,43 +415,65 @@ class RbdMirror:
                     else:
                         num_image = out[state_pattern]
                     log.info(
-                        "Images in {} pool in {} cluster {}: {}".format(
+                        "Images in {} pool in {} cluster {}: {}, expected is :{}".format(
                             kw.get("poolname"),
                             self.cluster_name,
                             state_pattern,
                             num_image,
+                            kw.get("images_pattern"),
                         )
                     )
                     if kw.get("images_pattern") == num_image:
                         return 0
             else:
-                if kw.get("state_pattern"):
-                    out = self.mirror_status("image", kw.get("imagespec"), "state")
-                    log.info(
-                        "State of {} image in {} cluster: {}".format(
-                            kw.get("imagespec"), self.cluster_name, out
+                try:
+                    if kw.get("state_pattern"):
+                        out = self.mirror_status("image", kw.get("imagespec"), "state")
+                        log.info(
+                            f"State of image {kw['imagespec']} : {out}, \
+                            waiting for {kw['state_pattern']}"
                         )
-                    )
-                    if kw.get("state_pattern") in out:
-                        return 0
-                if kw.get("description_pattern"):
-                    out = self.get_position(
-                        imagespec=kw.get("imagespec"),
-                        pattern=kw.get("description_pattern"),
-                    )
-                    log.info(
-                        "Description of {} image in {} cluster: {}".format(
-                            kw.get("imagespec"), self.cluster_name, out
+                        if kw["state_pattern"] in out:
+                            return 0
+                    if kw.get("description_pattern"):
+                        out = self.get_position(
+                            imagespec=kw.get("imagespec"),
+                            pattern=kw.get("description_pattern"),
                         )
-                    )
-                    return out
+                        log.info(
+                            "Description of {} image in {} cluster: {}".format(
+                                kw.get("imagespec"), self.cluster_name, out
+                            )
+                        )
+                        return out
+                    if kw.get("description"):
+                        image_description = self.mirror_status(
+                            "image", kw.get("imagespec"), "description"
+                        )
+                        log.debug(
+                            f"Image description: {image_description}, expected {kw['description']}"
+                        )
+                        if kw["description"] == image_description:
+                            return 0
+                except CommandFailed:
+                    if kw.get("state_pattern") == "down+unknown" or kw.get(
+                        "ignore_command_failure"
+                    ):
+                        continue
+                    else:
+                        raise
             if datetime.datetime.now() - starttime <= tout:
-                time.sleep(20)
+                time.sleep(kw.get("retry_interval", 20))
             else:
                 raise Exception("Required status can not be attained")
 
-    # Wait for replay to complete, check every 30 seconds
     def wait_for_replay_complete(self, imagespec):
+        """Waits till image replay to complete in journal based mirroring.
+
+        Args:
+            imagespec: image specification.
+        """
+        log.info(f"Waiting for {imagespec} to complete replay")
         while True:
             time.sleep(30)
             out = self.wait_for_status(
@@ -271,7 +482,7 @@ class RbdMirror:
             if self.ceph_version >= 4:
                 out1 = out.split('entries_behind_primary":')
                 out2 = out1[1].split(",")
-                log.info(f"entries_behind_primary : {out2[0]}")
+                log.debug(f"entries_behind_primary : {out2[0]}")
                 if int(out2[0]) == 0:
                     time.sleep(30)
                     return out2[0]
@@ -279,19 +490,41 @@ class RbdMirror:
                 if int(out.split("=")[-1]) == 0:
                     return 0
 
+    def wait_for_snapshot_complete(self, imagespec):
+        """verify for snapshot completion
+        Args:
+            imagespec: Image specification.
+        """
+        timeout = 600
+        while timeout:
+            log.info(f"verifying for snapshot completion for {imagespec}")
+            data = self.mirror_status("image", imagespec, "description").split(", ")[1:]
+            for value in data:
+                out = eval(value)
+                if out["local_snapshot_timestamp"] == out["remote_snapshot_timestamp"]:
+                    log.info("Snapshot is successfully completed")
+                    return 0
+                else:
+                    log.debug(
+                        f"remote_snapshot_timestamp : {data['remote_snapshot_timestamp']}"
+                    )
+            timeout = timeout - 1
+
     # Get Position
     def get_position(self, imagespec, pattern=None):
         out = self.mirror_status("image", imagespec, "description")
+        if out == "local image is primary":
+            raise Exception("Position cannot be determined ")
         if pattern is not None:
-            master_pos = out.find("master_position")
+            primary_pos = out.find("primary_position")
             mirror_pos = out.find("mirror_position")
             entries_behind = out.find("entries")
             pos = [
-                out[master_pos : mirror_pos - 2],
+                out[primary_pos : mirror_pos - 2],
                 out[mirror_pos : entries_behind - 2],
                 out[entries_behind:],
             ]
-            if "master" in pattern:
+            if "primary" in pattern:
                 return pos[0]
             elif "mirror" in pattern:
                 return pos[1]
@@ -310,18 +543,21 @@ class RbdMirror:
             return mirroring_details.get("mode")
         return None
 
-    def mirror_snapshot_schedule_add(self, poolname, **kwargs):
+    def mirror_snapshot_schedule_add(self, **kwargs):
         """
         This will schedule snapshot based on below kwargs
         Args:
-            poolname:
             **kwargs:
-                imagename : if image name is specified schedule will be done per image if not will done globally
-                interval : Positional argument need to be specified
+                poolname: if pool name is specified schedule will be done per pool, if not will be done globally
+                imagename : if image name is specified schedule will be done per image if not will be done per pool or
+                            globally
+                interval : Positional argument need to be specified, default will be 1minute
                 starttime : optional if specified will be configured
         Returns:
         """
-        cmd1 = f"rbd mirror snapshot schedule add --pool {poolname}"
+        cmd1 = "rbd mirror snapshot schedule add"
+        if kwargs.get("poolname"):
+            cmd1 += f" --pool {kwargs.get('poolname', '')}"
         if kwargs.get("imagename"):
             cmd1 += f" --image {kwargs.get('imagename')}"
         cmd1 += f" {kwargs.get('interval')}" if kwargs.get("interval") else " 1m"
@@ -358,7 +594,7 @@ class RbdMirror:
         """
         This will list the mirror snapshot schedule based on below kwargs
         Args:
-            poolname:
+            poolname: name of the pool
             **kwargs:
                 imagename : if imagename is specified list will be done per image if not will done globally
         Returns:
@@ -383,23 +619,49 @@ class RbdMirror:
             cmd1 += f" --image {kwargs.get('imagename')} --format=json"
         self.exec_cmd(cmd=cmd1)
 
-    def mirror_snapshot_schedule_remove(self, poolname, **kwargs):
+    def mirror_snapshot_schedule_remove(self, **kwargs):
         """
         This will remove the mirror snapshot schedule based on below kwargs
         Args:
-            poolname:
             **kwargs:
-                imagename : if imagename is specified schedule will be done per image if not will done globally
+                poolname : if poolname is specified schedule will be removed at pool level else cluster level
+                imagename : if imagename is specified schedule will be removed per image if not will done globally
                 interval : optional if specified will be configured
                 starttime : optional if specified will be configured
         Returns:
         """
-        cmd1 = f"rbd mirror snapshot schedule remove --pool {poolname}"
+        cmd1 = "rbd mirror snapshot schedule remove"
+        if kwargs.get("poolname"):
+            cmd1 += f" --pool {kwargs.get('poolname')}"
         if kwargs.get("imagename"):
             cmd1 += f" --image {kwargs.get('imagename')}"
         cmd1 += f" {kwargs.get('interval')}" if kwargs.get("interval") else ""
         cmd1 += f" {kwargs.get('starttime')}" if kwargs.get("starttime") else ""
         self.exec_cmd(cmd=cmd1)
+
+    def verify_snapshot_schedule_remove(self, **kwargs):
+        """
+        This will verify snapshot schedule got removed successfuly or not
+        Args:
+        **kwargs:
+            poolname : if poolname is specified schedule will be removed at pool level else cluster level
+            imagename : if imagename is specified schedule will be removed per image if not will done globally
+        Returns:
+            0 on Success
+            1 on Failure
+        """
+        cmd1 = "rbd mirror snapshot schedule list"
+        if kwargs.get("poolname"):
+            cmd1 += f" --pool {kwargs.get('poolname')}"
+        if kwargs.get("imagename"):
+            cmd1 += f" --image {kwargs.get('imagename')}"
+        output = self.exec_cmd(output=True, cmd=cmd1, check_ec=False)
+        if not output:
+            log.info("snapshot schedule got removed successfully")
+            return 0
+        else:
+            log.error("Failed to remove snapshot schedule")
+            return 1
 
     # Check data consistency
     def check_data(self, peercluster, imagespec):
@@ -407,7 +669,7 @@ class RbdMirror:
         peercluster.wait_for_status(imagespec=imagespec, state_pattern="up+replaying")
         if self.get_mirror_mode(imagespec) != "snapshot":
             peercluster.wait_for_replay_complete(imagespec)
-        export_path = "/home/cephuser/image.export"
+        export_path = "/home/cephuser/image.export_" + self.random_string()
         self.export_image(imagespec=imagespec, path=export_path)
         peercluster.export_image(imagespec=imagespec, path=export_path)
         local_md5 = self.exec_cmd(
@@ -428,19 +690,27 @@ class RbdMirror:
 
     # CLIs
     def benchwrite(self, **kw):
+        """Executes rbd bench write operation on provided image.
+
+        Args:
+          kw:
+            io: io size - Default 500M
+            imagespec: image specification
+        """
         if self.ceph_version < 3:
-            self.exec_cmd(
+            return self.exec_cmd(
                 cmd="rbd bench-write --io-total {} {}".format(
                     kw.get("io", "500M"), kw.get("imagespec")
                 ),
-                long_running=True,
+                **kw,
             )
         else:
-            self.exec_cmd(
-                cmd="rbd bench --io-type write --io-threads 16 --io-total {} {}".format(
-                    kw.get("io", "500M"), kw.get("imagespec")
+            return self.exec_cmd(
+                cmd=(
+                    "rbd bench --io-type write --io-threads 16 "
+                    f"--io-total {kw.get('io', '500M')} {kw.get('imagespec')}"
                 ),
-                long_running=True,
+                **kw,
             )
 
     def create_pool(self, **kw):
@@ -451,27 +721,82 @@ class RbdMirror:
             self.exec_cmd(cmd="rbd pool init {}".format(kw.get("poolname")))
 
     def create_image(self, **kw):
-        cmd = "rbd create -s {} {} --image-feature exclusive-lock,journaling".format(
-            kw.get("size", "2G"), kw.get("imagespec")
+        """
+        Create image on provided pool with default image feature
+        like exclusive-lock, layering, objectmap, fast-diff, deepflatten
+        Args:
+            **kw:
+                imagespec: pool/image_name
+                size: size of the image
+        """
+        cmd = "rbd create {} --size {}".format(
+            kw.get("imagespec"), kw.get("size", "2G")
         )
-
         if kw.get("datapool", self.datapool):
             cmd = cmd + " --data-pool {}".format(kw.get("datapool", self.datapool))
         self.exec_cmd(cmd=cmd)
 
+    def image_feature_enable(self, **kw):
+        """
+        enable image features on the existing image
+        Args:
+            **kw:
+                imagespec: pool/image_name on which image features will enable
+                image_feature: comma seperated value for image features, default: journaling
+        """
+        cmd = f"rbd feature enable {kw.get('imagespec')} {kw.get('image_feature')}"
+        self.exec_cmd(cmd=cmd)
+
+    def image_feature_disable(self, **kw):
+        """
+        Disable image features on the existing image
+        Args:
+            **kw:
+                imagespec: pool/image_name on which image features will disable
+                image_features: comma seperated value for image features
+        """
+        cmd = "rbd feature disable {} {}".format(
+            kw.get("imagespec"), kw.get("image_feature")
+        )
+        self.exec_cmd(cmd=cmd)
+
     def export_image(self, **kw):
+        """Exports provided image as provided path.
+
+        Args:
+          kw:
+            imagespec: image specification
+            path: path where image needs to be exported
+        """
         self.exec_cmd(
             cmd="rbd export {} {}".format(kw.get("imagespec"), kw.get("path")),
             long_running=True,
         )
 
     # Enable Pool or Image Mirroring
-    def enable_mirroring(self, *args, **kw):
-        self.exec_cmd(
+    def enable_mirroring(self, **kw):
+        """
+        Enable mirroring on provided pool with provided mode.
+        Args:
+            **kw:
+                mirror_level: pool if mirroring has to be enabled on a pool,
+                              image if mirroring has to be enabled only on a specific image in a pool
+                              this is a necessary parameter
+                specs: pool_name if mirroring has to be enabled on a pool,
+                       pool_name/image_name if mirroring has to be enabled on an image
+                       this is a necessary parameter
+                mode: pool if mirroring has to be enabled on all images in a pool by default,
+                      image if mirroring has to be enabled explicitly on images in a pool
+        """
+        out = self.exec_cmd(
+            output=True,
             cmd="rbd mirror {} enable {} {}".format(
-                args[0], args[1], kw.get("mode", "")
-            )
+                kw.get("mirror_level", "pool"),
+                kw.get("specs", "rbd"),
+                kw.get("mode", ""),
+            ),
         )
+        return out
 
     # Disable Pool or Image Mirroring
     def disable_mirroring(self, *args):
@@ -485,11 +810,20 @@ class RbdMirror:
         json_dict = json.loads(output)
         return self.value(args[1], json_dict)
 
-    # Mirroring Status
     def mirror_status(self, *args):
+        """Returns pool or image mirror status based on the input.
+
+        Args:
+            "pool" or "image" of which status needs to be checked.
+            <pool-name> or <image-specification> as per the need.
+            <key> field of status that is required to be returned.
+
+        Returns:
+            <value> of provided key present in status.
+        """
         output = self.exec_cmd(
             output=True,
-            cmd="rbd mirror {} status {} --format=json".format(args[0], args[1]),
+            cmd=f"rbd mirror {args[0]} status {args[1]} --format=json",
         )
         json_dict = json.loads(output)
         return self.value(args[2], json_dict)
@@ -503,26 +837,25 @@ class RbdMirror:
     def bootstrap_peers(self, **kw):
         """Create a bootstrap token on primary cluster and store under root"""
         cmd = "rbd mirror pool peer bootstrap create"
-        cmd += " --site-name master"
-        cmd += f" {kw['poolname']} > /root/bootstrap_token_master"
-        return self.exec_cmd(cmd=cmd)
+        cmd += f" --site-name {kw['cluster_name']}"
+        cmd += f" {kw['poolname']} > /root/bootstrap_token_primary"
+        return self.exec_cmd(cmd=cmd, **kw)
 
     def import_bootstrap(self, **kw):
         """Import bootstrap token that is created on primary from scecondary cluster"""
         if "one-way" in kw.get("way", ""):
             cmd = "rbd mirror pool peer bootstrap import"
-            cmd += " --site-name slave --direction rx-only"
-            cmd += f" {kw['poolname']} /root/bootstrap_token_master"
-            return self.exec_cmd(cmd=cmd)
+            cmd += f" --site-name {kw['cluster_name']} --direction rx-only"
+            cmd += f" {kw['poolname']} /root/bootstrap_token_primary"
+            return self.exec_cmd(cmd=cmd, **kw)
         else:
             cmd = "rbd mirror pool peer bootstrap import"
-            cmd += " --site-name slave"
-            cmd += f" {kw['poolname']} /root/bootstrap_token_master"
-            return self.exec_cmd(cmd=cmd)
+            cmd += f" --site-name {kw['cluster_name']}"
+            cmd += f" {kw['poolname']} /root/bootstrap_token_primary"
+            return self.exec_cmd(cmd=cmd, **kw)
 
     # Remove Peer
     def peer_remove(self, **kw):
-
         peer_uuid = self.mirror_info(kw.get("poolname"), "uuid")
         return self.exec_cmd(
             cmd="rbd mirror pool peer remove {} {}".format(
@@ -530,12 +863,17 @@ class RbdMirror:
             )
         )
 
-    # Promote Image
     def promote(self, **kw):
+        """Promote an image based on the given inputs.
+        Args:
+          kw:
+            force: True if image needs to be promoted forcefully.
+            imagespec: image specification.
+        """
         if kw.get("force"):
             return self.exec_cmd(
                 output=True,
-                cmd="rbd mirror image promote --force {}".format(kw.get("imagespec")),
+                cmd=f"rbd mirror image promote --force {kw.get('imagespec')}",
             )
         else:
             return self.exec_cmd(
@@ -543,16 +881,27 @@ class RbdMirror:
                 cmd="rbd mirror image promote {}".format(kw.get("imagespec")),
             )
 
-    # Demote Image
     def demote(self, imagespec):
-        return self.exec_cmd(cmd="rbd mirror image demote {}".format(imagespec))
+        """Demote an image.
 
-    # Resync Image
+        Args:
+            imagespec: image specifications of image to be resynced.
+        """
+        return self.exec_cmd(cmd=f"rbd mirror image demote {imagespec}")
+
     def resync(self, imagespec):
-        self.exec_cmd(cmd="rbd mirror image resync {}".format(imagespec))
+        """Initiate image resync.
 
-    def random_string(self):
-        temp_str = "".join([random.choice(string.ascii_letters) for _ in range(10)])
+        Args:
+            imagespec: image specifications of image to be resynced.
+        """
+        self.exec_cmd(cmd=f"rbd mirror image resync {imagespec}")
+
+    def random_string(self, **kw):
+        length = 10
+        if kw.get("len"):
+            length = kw["len"]
+        temp_str = "".join([random.choice(string.ascii_letters) for _ in range(length)])
         return temp_str
 
     def delete_pool(self, poolname):
@@ -601,26 +950,36 @@ class RbdMirror:
         if kw.get("dir_name"):
             self.exec_cmd(cmd="rm -rf {}".format(kw.get("dir_name")))
             peercluster.exec_cmd(cmd="rm -rf {}".format(kw.get("dir_name")))
+
         if kw.get("pools"):
             pool_list = kw.get("pools")
             if self.datapool:
                 pool_list.append(self.datapool)
+
+            # mon_allow_pool_delete must be True for removing pool
+            if self.ceph_version >= 5:
+                self.exec_cmd(cmd="ceph config set mon mon_allow_pool_delete true")
+                peercluster.exec_cmd(
+                    cmd="ceph config set mon mon_allow_pool_delete true"
+                )
+                time.sleep(20)
+
             for pool in pool_list:
                 self.delete_pool(poolname=pool)
                 peercluster.delete_pool(poolname=pool)
 
-    def get_rbd_service_name(self, service_name):
+    def get_rbd_service_name(self, service_name="rbd-mirror"):
         """
         Gets the rbd mirror service name where the rbd mirror daemon running
         Args:
-            service_name:
+            service_name: By default it would be "rbd-mirror"
 
         Returns:
             service_name --> str
         """
         service_name, rc = self.ceph_rbdmirror.exec_command(
             sudo=True,
-            cmd=f"systemctl list-units --all | grep {service_name} | awk {{'print $1'}}",
+            cmd=f"systemctl list-units --all | grep {service_name} | grep -Ev \\.target | awk {{'print $1'}}",
         )
         log.info(f"Service name : {service_name} ")
         return service_name
@@ -635,6 +994,9 @@ class RbdMirror:
         Returns:
             None
         """
+        if not service_name:
+            service_name = self.get_rbd_service_name()
+
         log.info(f"{operation}ing the service : {service_name} ")
         self.ceph_rbdmirror.exec_command(
             sudo=True, cmd=f"systemctl {operation} {service_name}"
@@ -655,10 +1017,11 @@ class RbdMirror:
 
         except CommandFailed as failed:
             if "No such file" in failed.args[0]:
+                log.info("No such image found")
                 return 1
             else:
                 raise CommandFailed
-
+        log.info("Image is found")
         return 0
 
     def rename_primary_image(self, source_imagespec, dest_imagespec, **kw):
@@ -728,3 +1091,358 @@ class RbdMirror:
         if daemon_status.strip("\n") != "active":
             return 1
         return 0
+
+    def get_mirror_pool_daemon_status(self, poolname):
+        """Refresh object argument ceph_rbdmirror based on mirror daemon status present in given pool's status.
+        Args:
+            poolname: name of the pool based on which status of daemon needs to be updated.
+        returns:
+            dict: dictionary of daemon details
+            1: if no daemons are up
+        """
+        out = self.exec_cmd(
+            cmd=f"rbd mirror pool status {poolname} --verbose --format json",
+            output=True,
+        )
+        json_dict = json.loads(out)
+
+        return json_dict.get("daemons", 1)
+
+    def update_ceph_rbdmirror(self, poolname, leader=True):
+        """Update ceph_rbdmirror value based on the provided values.
+        Args:
+            poolname: poolname to fetch mirror status.
+            leader: which daemon to be updated.
+            # currently it assumes that only 2 per cluster.
+        returns:
+            1: upon failure
+        """
+        mirror_daemon_dict = self.get_mirror_pool_daemon_status(poolname)
+        if mirror_daemon_dict == 1:
+            return 1
+        log.debug(f"mirror_daemon_dict: {mirror_daemon_dict}")
+        for each_daemon in mirror_daemon_dict:
+            if each_daemon["leader"] == leader:
+                self.ceph_rbdmirror = get_node_by_id(
+                    self.ceph_nodes, each_daemon["hostname"].split("-")[-1]
+                )
+                break
+
+
+def execute_dynamic(obj, test, results: dict, **kwargs):
+    """
+    Executes the test specified in test parameter with inputs args and returns results
+    Args:
+        obj: rbd mirror object, or a string to a module in which the test method exists
+        test: test to be executed
+        results: test results
+        **kwargs: input args required for the test
+
+    Returns:
+        test results updated to results dict
+    """
+    if isinstance(obj, str):
+        obj = import_module(obj)
+    method = getattr(obj, test)  # if obj else globals()[test]
+    try:
+        rc = method(**kwargs)
+        log.info(f"Return value for execution of method: {test} is {rc}")
+        if rc:
+            results.update({test: 1})
+        else:
+            results.update({test: 0})
+    except BaseException as e:
+        log.error(f"Error while running method {method}: {e}")
+        results.update({test: 1})
+
+
+def rbd_mirror_config(**kw):
+    """
+    Configure RBD mirroring on replicated pools, ecpools or both based on arguments specified
+    Args:
+        **kw:
+
+    Examples: In default configuration, pool and image names will be taken as random values.
+        Configuration for ecpools only :
+            config:
+                ec-pool-only: True
+        Configuration for replicated pools only :
+            config:
+                rep-pool-only: True
+        Advanced configuration:
+            config:
+               do_not_create_image: True  # if not set then images will be created by default
+               ec-pool-k-m: 2,1
+               ec-pool-only: False
+               ec_pool_config:
+                  pool: rbd_pool_4
+                  data_pool: rbd_ec_pool_4
+                  ec_profile: rbd_ec_profile_4
+                  image: rbd_image_4
+                  size: 10G
+                  io_total: 1G
+                  mode: image (default pool)
+                  mirrormode: snapshot (default journal)
+               rep_pool_config:
+                  pool: rbd_rep_pool
+                  image: rbd_rep_image
+                  size: 10G
+                  io_total: 1G
+                  mode: image (default pool)
+                  mirrormode: snapshot (default journal)
+    Args:
+        **kw:
+
+    Returns:
+        RBD mirror objects for ecpool and replicated pool
+    """
+    rbd_obj = dict()
+    log.debug(
+        f'config recieved for rbd_mirror_config: {kw.get("config", "Config not recieved, assuming default values")}'
+    )
+    # Create all the necessary configuration for replicated pool if not specified by user
+    if not kw.get("config") or not kw.get("config").get("ec-pool-only"):
+        ec_pool_k_m = kw.get("config", {}).pop("ec-pool-k-m", None)
+
+        rep_mirror1, rep_mirror2 = [
+            RbdMirror(cluster, kw.get("config", {}))
+            for cluster in kw.get("ceph_cluster_dict").values()
+        ]
+
+        # Create rep pool config when no configuration is specified for the module
+        if not kw.get("config"):
+            kw["config"] = {
+                "rep_pool_config": {
+                    "pool": "rep_pool_" + rep_mirror1.random_string(),
+                    "image": "rep_image_" + rep_mirror1.random_string(),
+                    "size": "1G",
+                    "io_total": "1G",
+                    "mode": "pool",
+                }
+            }
+        # Create rep pool config with all necessary config when only some are specified
+        elif kw.get("config").get("rep_pool_config"):
+            kw["config"]["rep_pool_config"]["pool"] = kw["config"][
+                "rep_pool_config"
+            ].get("pool", "rep_pool_" + rep_mirror1.random_string())
+            kw["config"]["rep_pool_config"]["image"] = kw["config"][
+                "rep_pool_config"
+            ].get("image", "rep_image_" + rep_mirror1.random_string())
+            kw["config"]["rep_pool_config"]["size"] = kw["config"][
+                "rep_pool_config"
+            ].get("size", "1G")
+            kw["config"]["rep_pool_config"]["io_total"] = kw["config"][
+                "rep_pool_config"
+            ].get("io_total", "1G")
+            kw["config"]["rep_pool_config"]["mode"] = kw["config"][
+                "rep_pool_config"
+            ].get("mode", "pool")
+
+        # Create rep pool config with all necessary config when no rep pool config is specified
+        else:
+            kw["config"]["rep_pool_config"] = {
+                "pool": "rep_pool_" + rep_mirror1.random_string(),
+                "image": "rep_image_" + rep_mirror1.random_string(),
+                "size": "1G",
+                "io_total": "1G",
+                "mode": "pool",
+            }
+
+        rep_mirror1.initial_mirror_config(
+            rep_mirror2,
+            poolname=kw["config"]["rep_pool_config"]["pool"],
+            imagename=kw["config"]["rep_pool_config"]["image"],
+            imagesize=kw["config"]["rep_pool_config"]["size"],
+            io_total=kw["config"]["rep_pool_config"]["io_total"],
+            mode=kw["config"]["rep_pool_config"]["mode"],
+            mirrormode=kw["config"]["rep_pool_config"].get("mirrormode", ""),
+            image_feature=kw["config"]["rep_pool_config"].get("image_feature", ""),
+            **kw,
+        )
+
+        kw["config"]["ec-pool-k-m"] = ec_pool_k_m
+        rbd_obj.update(
+            {"rep_rbdmirror": {"mirror1": rep_mirror1, "mirror2": rep_mirror2}}
+        )
+
+    # Create ec pool object only when rep-pool-only is not specified or set to false
+    if not kw.get("config").get("rep-pool-only"):
+        if not kw.get("config").get("ec-pool-k-m"):
+            kw["config"]["ec-pool-k-m"] = "go_with_default"
+
+        ec_mirror1, ec_mirror2 = [
+            RbdMirror(cluster, kw.get("config", {}))
+            for cluster in kw.get("ceph_cluster_dict").values()
+        ]
+        # RbdMirror class initiates a different poolname for data pool in every cluster
+        # Since we are using same ec pool, it would be required to use same data pool as well,
+        # Below line of code ensures that.
+        ec_mirror2.datapool = ec_mirror1.datapool
+
+        # Create ec pool config with all necessary config when some ec pool config is specified
+        if kw.get("config").get("ec_pool_config"):
+            kw["config"]["ec_pool_config"]["pool"] = kw["config"]["ec_pool_config"].get(
+                "pool", "ec_img_pool_" + ec_mirror1.random_string()
+            )
+            kw["config"]["ec_pool_config"]["image"] = kw["config"][
+                "ec_pool_config"
+            ].get("image", "ec_image" + ec_mirror1.random_string())
+            kw["config"]["ec_pool_config"]["size"] = kw["config"]["ec_pool_config"].get(
+                "size", "1G"
+            )
+            kw["config"]["ec_pool_config"]["io_total"] = kw["config"][
+                "ec_pool_config"
+            ].get("io_total", "1G")
+            kw["config"]["ec_pool_config"]["mode"] = kw["config"]["ec_pool_config"].get(
+                "mode", "pool"
+            )
+
+        # Create ec pool config with all necessary config when no ec pool config is specified
+        else:
+            kw["config"]["ec_pool_config"] = {
+                "pool": "ec_img_pool_" + ec_mirror1.random_string(),
+                "image": "ec_image" + ec_mirror1.random_string(),
+                "size": "1G",
+                "io_total": "1G",
+                "mode": "pool",
+            }
+
+        ec_mirror1.initial_mirror_config(
+            ec_mirror2,
+            poolname=kw["config"]["ec_pool_config"]["pool"],
+            imagename=kw["config"]["ec_pool_config"]["image"],
+            imagesize=kw["config"]["ec_pool_config"]["size"],
+            io_total=kw["config"]["ec_pool_config"]["io_total"],
+            mode=kw["config"]["ec_pool_config"]["mode"],
+            mirrormode=kw["config"]["ec_pool_config"].get("mirrormode", ""),
+            image_feature=kw["config"]["ec_pool_config"].get("image_feature", ""),
+            **kw,
+        )
+
+        rbd_obj.update({"ec_rbdmirror": {"mirror1": ec_mirror1, "mirror2": ec_mirror2}})
+
+    return rbd_obj
+
+
+def parallel_bench_on_n_images(
+    cluster: RbdMirror, imagespecs: List[str], io: str
+) -> None:
+    """Run benchwrite on list of provided images parallelly.
+
+    Args:
+        imagespec(List(str)): list of image specifications.
+        io(string): ios on each image.
+    """
+    with parallel() as p:
+        for imagespec in imagespecs:
+            p.spawn(cluster.benchwrite, imagespec=imagespec, io=io)
+
+
+def prepare_for_failback(demoted: RbdMirror, imagespec: str):
+    """Prepare image for failback after non-orderly failover.
+
+    Args:
+        demoted: RbdMirror object of cluster with previou primary.
+        imagespec: Image specification of image to be failed back.
+    """
+    log.info(f"Preparing image {imagespec} for failback")
+    demoted.demote(imagespec)
+    demoted.wait_for_status(imagespec=imagespec, state_pattern="up+error")
+    demoted.resync(imagespec)
+    demoted.wait_for_status(
+        imagespec=imagespec, state_pattern="up+replaying", ignore_command_failure=True
+    )
+    demoted.wait_for_replay_complete(imagespec)
+    # TBD: Implement above for snapshot-based mirroring.
+
+
+def fail_back(
+    promoted: RbdMirror,
+    demoted: RbdMirror,
+    imagespec: str,
+    orderly: bool,
+    wait_for_completion=True,
+):
+    """Perform failback.
+
+    Args:
+        promoted: RbdMirror object of cluster with promoted image.
+        demoted: RbdMirror object of cluster with previou primary.
+        imagespec: Image specification of image to be failed back.
+        orderly: boolean value true demoting failover mode.
+                 True - if orderly(relocated)
+                 False- if non-orderly(force prmoted)
+    """
+    log.info(f"Performing failback of image {imagespec}")
+
+    if not orderly:
+        if demoted.mirror_status("image", imagespec, "state") != "up+stopped":
+            log.error(
+                "Aborting failback, seems like non-orderly failover was not performed"
+            )
+            return 1
+
+        prepare_for_failback(demoted, imagespec)
+
+    elif demoted.mirror_status("image", imagespec, "state") == "up+stopped":
+        log.error("Aborting failback, seems like orderly failover was not performed")
+        return 1
+
+    promoted.demote(imagespec)
+    demoted.wait_for_status(imagespec=imagespec, state_pattern="up+unknown")
+    demoted.promote(imagespec=imagespec)
+
+    if wait_for_completion:
+        demoted.wait_for_status(
+            imagespec=imagespec, description="local image is primary"
+        )
+
+    return 0
+
+
+def create_mirrored_images_with_user_specified(**kw):
+    """Method to create user specified mirrored images.
+
+    Args:
+        **kw: test data
+
+    returns:
+        None
+    """
+    try:
+        config = kw.get("config")
+
+        mirror1 = RbdMirror(kw.get("ceph_cluster_dict").get("ceph-rbd1"), config)
+        mirror2 = RbdMirror(kw.get("ceph_cluster_dict").get("ceph-rbd2"), config)
+
+        poolname = config.get("poolname")
+        imagesize = config.get("imagesize")
+        mirrormode = config.get("mirrormode")
+        number_of_images = config.get("image-count")
+
+        for i in range(0, number_of_images):
+            imagename = "test_mirror_image" + mirror1.random_string(len=3)
+            imagespec = poolname + "/" + imagename
+
+            mirror1.create_image(imagespec=imagespec, size=imagesize)
+            mirror1.enable_mirror_image(poolname, imagename, mirrormode)
+            mirror1.mirror_snapshot_schedule_add(poolname=poolname, imagename=imagename)
+
+            with parallel() as p:
+                p.spawn(
+                    mirror1.wait_for_status,
+                    imagespec=imagespec,
+                    state_pattern="up+stopped",
+                )
+                p.spawn(
+                    mirror2.wait_for_status,
+                    imagespec=imagespec,
+                    state_pattern="up+replaying",
+                )
+
+        log.info(f"Created {number_of_images} images with {mirrormode} based mirroring")
+        return 0
+
+    except Exception as e:
+        log.exception(e)
+        return 1

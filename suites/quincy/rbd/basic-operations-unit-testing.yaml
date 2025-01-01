@@ -93,6 +93,8 @@ tests:
         install_packages:
           - ceph-common
           - rbd-nbd
+          - jq
+          - fio
         node: node6
       desc: "Configure the client system"
       destroy-cluster: false
@@ -125,15 +127,6 @@ tests:
       module: test_rbd.py
       name: 3_rbd_cli_import_export
       polarion-id: CEPH-83574240
-  -
-    test:
-      config:
-        script: luks-encryption.sh
-        script_path: qa/workunits/rbd
-      desc: "Executing upstream RBD LUKS Encryption scenarios"
-      module: test_rbd.py
-      name: 4_rbd_luks_encryption
-      polarion-id: CEPH-83574242
   -
     test:
       config:

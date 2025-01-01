@@ -1,7 +1,6 @@
 import json
 import traceback
 
-from tests.cephfs.cephfs_utilsV1 import FsUtils
 from utility.log import Log
 
 log = Log(__name__)
@@ -23,14 +22,39 @@ This Script needs 2 times of run:
 def run(ceph_cluster, **kw):
     ceph_version_path = "/tmp/ceph_versions.json"
     log.info("Upgrade checking initiated")
-    fs_util = FsUtils(ceph_cluster)
     client = ceph_cluster.get_ceph_objects("client")[0]
-    fs_util.auth_list([client])
     check_list = ["mon", "mgr", "osd", "mds", "overall"]
+    cluster_stat_commands = [
+        "ceph fs ls",
+        "ceph fs status",
+        "ceph mds stat",
+        "ceph fs dump",
+    ]
     try:
         out0, err0 = client.exec_command(
             sudo=True, cmd=f"stat {ceph_version_path}", check_ec=False
         )
+
+        def version_compare(v1, v2):
+            arr1 = v1.split(".")[:-1]
+            arr2 = v2.split(".")[:-1]
+            n = len(arr1)
+            m = len(arr2)
+            arr1 = [int(i) for i in arr1]
+            arr2 = [int(i) for i in arr2]
+            if n > m:
+                for i in range(m, n):
+                    arr2.append(0)
+            elif m > n:
+                for i in range(n, m):
+                    arr1.append(0)
+            for i in range(len(arr1)):
+                if arr1[i] > arr2[i]:
+                    return 1
+                elif arr2[i] > arr1[i]:
+                    return -1
+            return 0
+
         if out0:
             log.info("Loading previous ceph versions")
             with client.remote_file(
@@ -47,9 +71,12 @@ def run(ceph_cluster, **kw):
                 cur_version = str(upgraded_data[daemon]).split()[2]
                 log.info(f"Previous ceph {daemon} version is {pre_version}")
                 log.info(f"Current ceph {daemon} version is {cur_version}")
-            if pre_version >= cur_version:
-                fail_daemon.append(daemon)
-                log.info(f"Upgrade is not properly done for {daemon}")
+                pre_version = pre_version.replace("-", ".")
+                cur_version = cur_version.replace("-", ".")
+                result = version_compare(cur_version, pre_version)
+                if result == -1 or result == 0:
+                    fail_daemon.append(daemon)
+                    log.error(f"Upgrade failed for {daemon}")
             before_file.close()
             if len(fail_daemon) > 0:
                 log.error(f"Upgrade failed for these daemons: {str(fail_daemon)}")
@@ -61,14 +88,14 @@ def run(ceph_cluster, **kw):
                 sudo=True, cmd=f"ceph versions --format json > {ceph_version_path}"
             )
             out2, err2 = client.exec_command(sudo=True, cmd=f"cat {ceph_version_path}")
-            log.info(print(out2))
+            log.info(out2)
 
         file_stat_path = "/tmp/file_stat.txt"
         testing_file_path = "/tmp/stat_testing.txt"
         out0, err0 = client.exec_command(
             sudo=True, cmd=f"stat {file_stat_path}", check_ec=False
         )
-        log.info(print(out0))
+        log.info(out0)
         if out0:
             log.info("---------Comparing stats of a file after upgrade--------------")
             log.info(
@@ -81,12 +108,56 @@ def run(ceph_cluster, **kw):
             out2, err2 = client.exec_command(sudo=True, cmd=f"cat {file_stat_path}")
             cur_stat = out1.split(",")
             pre_stat = out2.split(",")
-            log.info(print("Current testing file stats: ", cur_stat))
-            log.info(print("Previous testing file stats: ", pre_stat))
+            log.info("Current testing file stats: ", cur_stat)
+            log.info("Previous testing file stats: ", pre_stat)
             for idx in range(4):
                 if cur_stat[idx] != pre_stat[idx]:
                     return 1
             log.info("After upgrade file stats are identical")
+            after_upgrade_file = client.remote_file(
+                sudo=True,
+                file_name="/home/cephuser/ceph_cluster_after_upgrade.txt",
+                file_mode="w",
+            )
+            for cmd in cluster_stat_commands:
+                out, rc = client.exec_command(
+                    sudo=True, cmd=f"{cmd} --format json-pretty"
+                )
+                log.info(out)
+                after_upgrade_file.write(f"{cmd}\n")
+                output = json.loads(out)
+                after_upgrade_file.write(json.dumps(output, indent=4))
+                after_upgrade_file.write("\n")
+            after_upgrade_file.flush()
+            before_upgrade_file = client.remote_file(
+                sudo=True,
+                file_name="/home/cephuser/ceph_cluster_before_upgrade.txt",
+                file_mode="r",
+            )
+            after_upgrade_file = client.remote_file(
+                sudo=True,
+                file_name="/home/cephuser/ceph_cluster_after_upgrade.txt",
+                file_mode="r",
+            )
+            log.info(
+                "----------------Before Upgrade Cluster Status-----------------------------------"
+            )
+            for line in before_upgrade_file.readlines():
+                log.info(line)
+            log.info(
+                "----------------After Upgrade cluster status------------------------------------"
+            )
+            for line in after_upgrade_file.readlines():
+                log.info(line)
+            clients = ceph_cluster.get_ceph_objects("client")
+            cmd = (
+                "dnf clean all;dnf -y install ceph-common --nogpgcheck;"
+                "dnf -y update ceph-common --nogpgcheck; "
+                "dnf -y install ceph-fuse --nogpgcheck;"
+                "dnf -y update ceph-fuse --nogpgcheck;"
+            )
+            for client in clients:
+                client.exec_command(sudo=True, cmd=cmd)
         else:
             log.info("---------Writing stats of a file before upgrade--------------")
             log.info(
@@ -98,6 +169,21 @@ def run(ceph_cluster, **kw):
                 cmd=f"stat --format=%a,%A,%u,%U,%w {testing_file_path} > {file_stat_path}",
             )
             log.info(out1)
+            before_upgrade_file = client.remote_file(
+                sudo=True,
+                file_name="/home/cephuser/ceph_cluster_before_upgrade.txt",
+                file_mode="w",
+            )
+            for cmd in cluster_stat_commands:
+                out, rc = client.exec_command(
+                    sudo=True, cmd=f"{cmd} --format json-pretty"
+                )
+                log.info(out)
+                before_upgrade_file.write(f"{cmd}\n")
+                output = json.loads(out)
+                before_upgrade_file.write(json.dumps(output, indent=4))
+                before_upgrade_file.write("\n")
+            before_upgrade_file.flush()
         return 0
     except Exception as e:
         log.error(e)

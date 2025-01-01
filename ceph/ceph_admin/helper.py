@@ -1,6 +1,7 @@
 """
 Contains helper functions that can used across the module.
 """
+
 import json
 import os
 import tempfile
@@ -10,11 +11,13 @@ from os.path import dirname
 from time import sleep
 from typing import Optional
 
+from dateutil import parser
 from jinja2 import Template
 
 from ceph.ceph import CommandFailed
 from ceph.utils import get_node_by_id, get_nodes_by_ids
 from utility.log import Log
+from utility.ssl_certs import CertificateGenerator
 from utility.utils import generate_self_signed_certificate
 
 LOG = Log(__name__)
@@ -22,6 +25,36 @@ LOG = Log(__name__)
 
 class UnknownSpecFound(Exception):
     pass
+
+
+def create_nvme_certificates(node, **kwargs):
+    """Create NVMe mTLS Server, client keys and certificates.
+
+    Args:
+        node: CephNode
+        kwargs: cert arguments
+    """
+    domain_name = kwargs["domain"]
+
+    _nodes = kwargs.get("nodes", [])
+    is_server = kwargs.get("is_server", False)
+    dest_path = "/etc/mtls"
+
+    if is_server:
+        key, cert = "server.key", "server.crt"
+        node_ips = [i.ip_address for i in _nodes]
+    else:
+        key, cert = "client.key", "client.crt"
+        node_ips = []
+
+    _nodes.append(node)
+    for node in _nodes:
+        node.exec_command(cmd=f"mkdir -p {dest_path}", sudo=True)
+
+    server_cert_gen = CertificateGenerator(_nodes, domain_name, ips=node_ips)
+    server_cert_gen.generate_key()
+    server_cert_gen.generate_certificate(is_server=is_server)
+    return server_cert_gen.save_files(key, cert, dest_path)
 
 
 class GenerateServiceSpec:
@@ -123,6 +156,21 @@ class GenerateServiceSpec:
         """
         label_set = set(node.role.role_list)
         return list(label_set)
+
+    @staticmethod
+    def get_gateway_cidr(node):
+        """
+        Returns the gateway and CIDR of a node
+
+        :param
+            node (CephNode): node object
+
+        :return: list (gateway, cidr)
+        """
+        node_sub = node.subnet
+        gw = node_sub.split("/")[0]
+        cidr = node_sub.split("/")[1]
+        return gw, cidr
 
     def get_hostnames(self, node_names):
         """
@@ -230,11 +278,25 @@ class GenerateServiceSpec:
                   nodes:
                     - node2
                     - node3
+                spec:
+                  crush_locations:
+                    node1:
+                    - datacenter=DC1
+                    node2:
+                    - datacenter=DC2
         """
         template = self._get_template("common_svc_template")
         node_names = spec["placement"].pop("nodes", None)
         if node_names:
             spec["placement"]["hosts"] = self.get_hostnames(node_names)
+
+        # Ensure 'crush_locations' under 'spec' are handled if present
+        if "spec" in spec and "crush_locations" in spec["spec"]:
+            crush_locations = {}
+            for host in spec["spec"]["crush_locations"].keys():
+                hostname = self.get_hostnames([host])[0]
+                crush_locations[hostname] = spec["spec"]["crush_locations"][host]
+            spec["spec"]["crush_locations"] = crush_locations
 
         return template.render(spec=spec)
 
@@ -368,6 +430,72 @@ class GenerateServiceSpec:
 
         return template.render(spec=spec)
 
+    def generate_nvmeof_spec(self, spec):
+        """Return spec content for nvmeof service.
+
+        If mTLS is required, then
+
+        Args:
+            spec (Dict): nvmeof service spec config
+
+        Returns:
+            service_spec (Str)
+
+        Example::
+
+            spec:
+              - service_type: nvmeof
+                service_id: rbd
+                unmanaged: boolean    # true or false
+                mtls: true
+                placement:
+                  host_pattern: "*"   # either hosts or host_pattern
+                  nodes:
+                    - node2
+                    - node3
+                  label: nvmeof
+                spec:
+                   pool: rbd
+                   enable_auth: true
+                   group: group1
+                   server_cert: <server-cert>
+                   server_key: <server-key>
+                   client_cert: <client-cert>
+                   client_key: <client-key>
+        """
+        template = self._get_template("nvmeof")
+        node_names = spec["placement"].pop("nodes", None)
+        if node_names:
+            spec["placement"]["hosts"] = self.get_hostnames(node_names)
+
+        mtls = spec.pop("mtls", None)
+        if mtls:
+            spec["spec"]["enable_auth"] = True
+
+            # server cert
+            nodes = get_nodes_by_ids(self.cluster, node_names)
+            key, cert = create_nvme_certificates(
+                self.node,
+                domain="nvme.server",
+                nodes=nodes,
+                is_server=True,
+            )
+            spec["spec"]["root_ca_cert"] = cert.strip()
+            spec["spec"]["server_cert"] = cert.strip()
+            spec["spec"]["server_key"] = key.strip()
+
+            # client cert
+            key, cert = create_nvme_certificates(
+                self.node,
+                domain="nvme.client",
+                nodes=nodes,
+                is_server=False,
+            )
+            spec["spec"]["client_cert"] = cert.strip()
+            spec["spec"]["client_key"] = key.strip()
+
+        return template.render(spec=spec)
+
     def generate_rgw_spec(self, spec):
         """
         Return spec content for rgw service
@@ -417,20 +545,24 @@ class GenerateServiceSpec:
         if node_names:
             spec["placement"]["hosts"] = self.get_hostnames(node_names)
 
-        if spec["spec"].get("rgw_frontend_ssl_certificate") == "create-cert":
-            subject = {
-                "common_name": spec["placement"]["hosts"][0],
-                "ip_address": self.cluster.get_node_by_hostname(
-                    spec["placement"]["hosts"][0]
-                ).ip_address,
-            }
-            key, cert, ca = generate_self_signed_certificate(subject=subject)
-            pem = key + cert + ca
-            cert_value = "|\n" + pem
-            spec["spec"]["rgw_frontend_ssl_certificate"] = "\n    ".join(
-                cert_value.split("\n")
-            )
-            LOG.debug(pem)
+        if spec.get("spec", False):
+            if spec["spec"].get("rgw_frontend_ssl_certificate", False):
+                if spec["spec"].get("rgw_frontend_ssl_certificate") == "create-cert":
+                    subject = {
+                        "common_name": spec["placement"]["hosts"][0],
+                        "ip_address": self.cluster.get_node_by_hostname(
+                            spec["placement"]["hosts"][0]
+                        ).ip_address,
+                    }
+                    key, cert, ca = generate_self_signed_certificate(subject=subject)
+                    pem = key + cert + ca
+                    cert_value = "|\n" + pem
+                    spec["spec"]["rgw_frontend_ssl_certificate"] = "\n    ".join(
+                        cert_value.split("\n")
+                    )
+                    LOG.debug(pem)
+
+        LOG.info(f"Generated rgw specification : {spec}")
 
         return template.render(spec=spec)
 
@@ -444,7 +576,7 @@ class GenerateServiceSpec:
         Returns:
             service_spec (Str)
 
-        Example::
+        Example1::
 
         specs:
               - service_type: snmp-destination
@@ -452,6 +584,14 @@ class GenerateServiceSpec:
                   credentials:
                     snmp_v3_auth_username: myadmin
                     snmp_v3_auth_password: mypassword
+        Example2::
+
+        specs:
+              - service_type: snmp-destination
+                spec:
+                  credentials:
+                    snmp_community: public
+
         """
         template = self._get_template("snmp")
         destination_node = spec["spec"].pop("snmp_destination", None)
@@ -465,6 +605,19 @@ class GenerateServiceSpec:
         engine_id = out.replace("-", "")
         if engine_id:
             spec["spec"]["engine_id"] = engine_id
+        # Check whether SNMPv2 or SNMPv3 credentials are present in spec
+        if "snmp_community" in spec["spec"]["credentials"]:
+            # Use SNMPv2
+            spec["spec"]["snmp_version"] = "V2c"
+        elif (
+            "snmp_v3_auth_username" in spec["spec"]["credentials"]
+            and "snmp_v3_auth_password" in spec["spec"]["credentials"]
+        ):
+            # Use SNMPv3
+            spec["spec"]["snmp_version"] = "V3"
+        else:
+            # Raise an exception for unexpected credentials
+            raise ValueError("Unexpected credentials")
         return template.render(spec=spec)
 
     def generate_snmp_dest_conf(self, spec):
@@ -477,7 +630,7 @@ class GenerateServiceSpec:
         Returns:
             destination_conf (Str)
 
-        Example::
+        Example1::
 
             spec:
                 - service_type: snmp-gateway
@@ -491,6 +644,19 @@ class GenerateServiceSpec:
                     port: 9464
                     snmp_destination: node
                     snmp_version: V3
+        Example2::
+
+            spec:
+                - service_type: snmp-gateway
+                  service_name: snmp-gateway
+                  placement:
+                    count: 1
+                  spec:
+                    credentials:
+                      snmp_community: public
+                    port: 9464
+                    snmp_destination: node
+                    snmp_version: V2c
 
         """
         template = self._get_template("snmp_destination")
@@ -533,6 +699,7 @@ class GenerateServiceSpec:
                   virtual_ip: 10.0.208.0/22
                   frontend_port: 8000
                   monitor_port: 1967
+                  ssl_cert: create-cert | <contents of crt>
 
         :Note: make sure rgw service is already created.
 
@@ -541,6 +708,21 @@ class GenerateServiceSpec:
         node_names = spec["placement"].pop("nodes", None)
         if node_names:
             spec["placement"]["hosts"] = self.get_hostnames(node_names)
+
+        if spec["spec"].get("ssl_cert") == "create-cert":
+            subject = {
+                "common_name": spec["placement"]["hosts"][0],
+                "ip_address": self.cluster.get_node_by_hostname(
+                    spec["placement"]["hosts"][0]
+                ).ip_address,
+            }
+            key, cert, ca = generate_self_signed_certificate(subject=subject)
+            pem = key + cert + ca
+            cert_value = "|\n" + pem
+            spec["spec"]["ssl_cert"] = "\n    ".join(cert_value.split("\n"))
+            LOG.debug(pem)
+            vip_node = get_node_by_id(self.cluster, node_names[0])
+            _, vip_cidr = self.get_gateway_cidr(vip_node)
 
         return template.render(spec=spec)
 
@@ -563,6 +745,7 @@ class GenerateServiceSpec:
             "snmp-gateway": self.generate_snmp_spec,
             "snmp-destination": self.generate_snmp_dest_conf,
             "ingress": self.generate_ingress_spec,
+            "nvmeof": self.generate_nvmeof_spec,
         }
 
         try:
@@ -589,7 +772,7 @@ class GenerateServiceSpec:
 
         LOG.info(f"Spec yaml file content:\n{spec_content}")
         # Create spec yaml file
-        temp_file = tempfile.NamedTemporaryFile(suffix=".yaml")
+        temp_file = tempfile.NamedTemporaryFile(dir="/tmp", suffix=".yaml")
         spec_file = self.node.node.remote_file(
             sudo=True, file_name=temp_file.name, file_mode="w"
         )
@@ -678,9 +861,7 @@ def get_cluster_state(cls, commands=None):
     __CLUSTER_STATE_COMMANDS.extend(commands)
 
     for cmd in __CLUSTER_STATE_COMMANDS:
-        out, err = cls.shell(args=[cmd])
-        LOG.info("STDOUT:\n %s" % out)
-        LOG.error("STDERR:\n %s" % err)
+        cls.shell(args=[cmd], pretty_print=True)
 
 
 def get_host_osd_map(cls):
@@ -763,6 +944,37 @@ def file_or_path_exists(node, file_or_path):
     return False
 
 
+def file_or_path_updated(node, file_or_path, interval=120):
+    """
+    Method to check if the given file or directory was updated in the given interval
+    Args:
+        node: node object where file should be exists
+        file_or_path: ceph file or directory path
+        interval: if mentioned checks whether the file existing in the given path
+                              was updated anytime between now and the interval given here.
+
+    Returns:
+        boolean
+    """
+    try:
+        out, _ = node.exec_command(cmd=f"date -u -r {file_or_path}", sudo=True)
+        LOG.info(f"Output : {out}")
+    except CommandFailed as err:
+        LOG.error(f"Error: {err}")
+        return False
+
+    modified_time = parser.parse(out).replace(tzinfo=None)
+    time_now = datetime.utcnow().replace(tzinfo=None)
+    time_diff = (time_now - modified_time).seconds
+    LOG.info(f"Time difference between now and gz file modified date : {time_diff}")
+    if time_diff > interval:
+        LOG.error(
+            f"The gz file was not created within the previous {time_diff} seconds"
+        )
+        return False
+    return True
+
+
 def monitoring_file_existence(node, file_or_path, file_exist=True, timeout=180):
     """Method to monitor a file existence.
 
@@ -831,6 +1043,49 @@ def validate_log_file_after_enable(cls):
     return True
 
 
+def validate_log_rotate(cls):
+    """
+    Verify logrotation of cephadm.log file
+    Args:
+        cls: cephadm instance object
+
+    Returns:
+        boolean
+    """
+    # step 1: check for the files in current log directory
+    if not file_or_path_exists(cls.installer, "/var/log/ceph/cephadm.log"):
+        LOG.error("Log rotation failed: Logs not present in /var/log/ceph folder")
+        return False
+
+    # step 2: apply logrotate on cephadm.log
+    out = cls.installer.exec_command(
+        cmd="logrotate --force /etc/logrotate.d/cephadm", sudo=True
+    )
+    # if logrotate doesn't result in logs being zipped return False
+    if not file_or_path_updated(
+        cls.installer, "/var/log/ceph/cephadm.log.1.gz", 120
+    ) and file_or_path_exists(cls.installer, "/var/log/ceph/cephadm.log"):
+        LOG.error("Log rotation failed while enabling rotate")
+        return False
+
+    # step 3: perform any operation that would result in cephadm log be written
+    out, _ = cls.shell(args=["ceph", "orch", "ps", "--format", "json"])
+    daemons = json.loads(out)
+    daemon = [d for d in daemons if "mon" in d["daemon_name"]][0]
+    out, _ = cls.shell(
+        args=["ceph", "orch", "daemon", "redeploy", daemon["daemon_name"]]
+    )
+
+    # step 4: check new cephadm.log file is created
+    if not file_or_path_exists(cls.installer, "/var/log/ceph/cephadm.log"):
+        LOG.error(
+            "Log rotation failed: Logs not present in /var/log/ceph folder after logrotate"
+        )
+        return False
+
+    return True
+
+
 def check_service_exists(
     installer,
     service_name: Optional[str] = None,
@@ -870,9 +1125,12 @@ def check_service_exists(
     _count = 0
     while end_time > datetime.now():
         sleep(interval)
-        out, err = installer.exec_command(
+        out, _ = installer.exec_command(
             sudo=True, cmd=" ".join(cmd_args), check_ec=True
         )
+        if "No services reported" in out:
+            LOG.warning(out)
+            continue
         out = json.loads(out)[0]
         running = out["status"]["running"]
         count = out["status"]["size"]
@@ -927,3 +1185,67 @@ def validate_spec_services(installer, specs, rhcs_version) -> None:
             rhcs_version=rhcs_version,
         ):
             raise Exception(f"{svc_name or svc_type} service deployment failed!!!")
+
+
+def add_remove_osd(command, osd_nodes, ceph_nodes, orch_obj, osd_obj, ceph_admin):
+    """
+    Performs the operation specified in command on all the OSDs in the osd_nodes specified
+    Args:
+        command: add, rm
+        osd_nodes: [node4,node5]
+        config:
+            ceph_cluster_config
+    """
+    if command == "add":
+        try:
+            add_config = {
+                "service": "orch",
+                "validate-spec-services": "true",
+                "specs": [
+                    {
+                        "service_type": "osd",
+                        "service_id": "osd_add_nodes",
+                        "placement": {"nodes": osd_nodes},
+                        "spec": {"data_devices": {"all": "true"}},
+                    }
+                ],
+            }
+            orch_obj.apply_spec(add_config)
+            add_config.update({"validate-spec-services": "false"})
+            add_config["specs"][0].update({"unmanaged": "true"})
+            orch_obj.apply_spec(add_config)
+        except BaseException as e:
+            LOG.error(f"Adding OSDs failed on nodes {osd_nodes} with error {e}")
+            return 1
+        return 0
+
+    if command == "rm":
+        nodes = get_nodes_by_ids(ceph_nodes, osd_nodes)
+        for node in nodes:
+            osds = json.loads(
+                orch_obj.ps(
+                    {
+                        "base_cmd_args": {"format": "json"},
+                        "args": {"hostname": node.hostname},
+                    }
+                )[0]
+            )
+            for osd in osds[:-1]:
+                try:
+                    rm_config = {
+                        "command": command,
+                        "base_cmd_args": {"zap": "true"},
+                        "pos_args": [osd["daemon_id"]],
+                    }
+                    osd_obj.rm(rm_config)
+                except BaseException as e:
+                    LOG.error(
+                        f"OSD removal failed for osd {osd['daemon_id']} with error {e}"
+                    )
+                    return 1
+
+            LOG.info(
+                f"Fetching cluster state after removal of OSD from node {node.hostname}"
+            )
+            get_cluster_state(cls=ceph_admin)
+        return 0

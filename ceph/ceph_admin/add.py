@@ -39,7 +39,7 @@ class AddMixin:
         pos_args = config["pos_args"]
         node = pos_args[0]
         host_id = get_node_by_id(self.cluster, node)
-        host = host_id.shortname
+        host = host_id.hostname
 
         if service == "osd":
             base_cmd.extend([f"{host}:{','.join(pos_args[1:])}"])
@@ -53,4 +53,4 @@ class AddMixin:
         if config.get("args"):
             base_cmd.append(config_dict_to_string(config["args"]))
 
-        out, _ = self.shell(base_cmd)
+        return self.shell(base_cmd)

@@ -25,7 +25,8 @@ tests:
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
-                skip-dashboard: true
+                initial-dashboard-password: admin@123
+                dashboard-password-noupdate: true
           - config:
               command: add_hosts
               service: host
@@ -94,6 +95,37 @@ tests:
       name: deploy cluster
 
   - test:
+      name: Monitoring Services deployment
+      desc: Add monitoring services using spec file.
+      module: test_cephadm.py
+      polarion-id: CEPH-83574727
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: prometheus
+                  placement:
+                    count: 1
+                    nodes:
+                      - node1
+                - service_type: grafana
+                  placement:
+                    nodes:
+                      - node1
+                - service_type: alertmanager
+                  placement:
+                    count: 1
+                - service_type: node-exporter
+                  placement:
+                    host_pattern: "*"
+                - service_type: crash
+                  placement:
+                    host_pattern: "*"
+
+  - test:
       abort-on-fail: true
       config:
         command: add
@@ -147,3 +179,35 @@ tests:
       module: exec.py
       name: configure realm
       polarion-id: CEPH-83573815
+
+  - test:
+      abort-on-fail: true
+      config:
+        node: node7
+        sudo: True
+        commands:
+          - "yum install -y jq"
+          - "radosgw-admin zonegroup get --rgw-zonegroup=south > /tmp/zonegroup_south_backup.json"
+          - "jq -r '.zones[].log_data=false | .zones[].sync_from_all=false' /tmp/zonegroup_south_backup.json > /tmp/zonegroup_south.json"
+          - "radosgw-admin zonegroup set --rgw-zonegroup=south --infile=/tmp/zonegroup_south.json"
+          - "radosgw-admin period update --rgw-realm india --commit"
+          - "radosgw-admin zonegroup get --rgw-zonegroup=east > /tmp/zonegroup_east_backup.json"
+          - "jq -r '.zones[].log_data=false | .zones[].sync_from_all=false' /tmp/zonegroup_east_backup.json > /tmp/zonegroup_east.json"
+          - "radosgw-admin zonegroup set --rgw-zonegroup=east --infile=/tmp/zonegroup_east.json"
+          - "radosgw-admin period update --rgw-realm us --commit"
+          - "sleep 20"
+      desc: Disabling sync between the zones
+      module: exec.py
+      name: disable sync between zones
+      polarion-id: CEPH-83581229
+      comments: Known issue BZ-2303415 targeted to 6.1z8
+
+  - test:
+      name: Test the byte ranges with get object
+      desc: Test the byte ranges with get_object
+      polarion-id: CEPH-83572691
+      module: sanity_rgw.py
+      config:
+        test-version: v2
+        script-name: test_byte_range.py
+        config-file-name: test_byte_range.yaml

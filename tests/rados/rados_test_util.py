@@ -46,28 +46,32 @@ def write_to_pools(config, rados_obj, client_node):
     pools = config.get("create_pools")
     for each_pool in pools:
         cr_pool = each_pool["create_pool"]
+        nobj = cr_pool.get("num_objs", 100)
         if cr_pool.get("rados_put", False):
-            do_rados_put(mon=client_node, pool=cr_pool["pool_name"], nobj=100)
+            do_rados_put(mon=client_node, pool=cr_pool["pool_name"], nobj=nobj)
         else:
             method_should_succeed(rados_obj.bench_write, **cr_pool)
 
 
-def wait_for_device(host, osd_id, action: str) -> bool:
+def wait_for_device(host, osd_id, action: str, timeout: int = 9000) -> bool:
     """
     Waiting for the device to be removed/added based on the action
     Args:
         host: host object
         osd_id: osd id
         action: add/remove device path
+        timeout: wait timeout in seconds
     Returns:  True -> pass, False -> fail
     """
-    end_time = datetime.datetime.now() + datetime.timedelta(seconds=9000)
+    end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
     while end_time > datetime.datetime.now():
         flag = True
 
         out, _ = host.exec_command(sudo=True, cmd="podman ps --format json")
         container = [
-            item["Names"][0] for item in json.loads(out) if "ceph" in item["Command"]
+            item["Names"][0]
+            for item in json.loads(out)
+            if any("osd" in name for name in item["Names"])
         ]
         should_not_be_empty(container, "Failed to retrieve container ids")
         volume_out, _ = host.exec_command(
@@ -105,11 +109,19 @@ def get_device_path(host, osd_id):
     Returns:  device path
     """
     out, _ = host.exec_command(sudo=True, cmd="podman ps --format json")
-    container_id = [
-        item["Names"][0]
-        for item in json.loads(out)
-        if f"osd.{osd_id}" in item["Command"]
-    ][0]
+    out = json.loads(out)
+    log.debug(f"containers on the host :\n {out}\n")
+    try:
+        container_id = [
+            item["Names"][0]
+            for item in out
+            if item.get("Names")
+            and item.get("Names")[0]
+            and item.get("Command")
+            and f"osd.{osd_id}" in item["Command"]
+        ][0]
+    except Exception as err:
+        log.error(f"host exception : {err}")
     should_not_be_empty(container_id, "Failed to retrieve container id")
     # fetch device path by osd_id
     volume_out, _ = host.exec_command(
@@ -140,7 +152,7 @@ def get_slow_requests_log(node, start_time, end_time, service_name="mon"):
         d_out, d_err = node.exec_command(
             cmd=f"systemctl list-units --type=service | grep ceph | grep {service_name} | head -n 1"
         )
-        daemon = d_out.split(" ")[0].rstrip()
+        daemon = d_out.lstrip().split(" ")[0].rstrip()
         j_log, err = node.exec_command(
             cmd=f"sudo journalctl -u {daemon} --since '{start_time}' --until '{end_time}' | grep 'slow requests'"
         )
@@ -149,3 +161,47 @@ def get_slow_requests_log(node, start_time, end_time, service_name="mon"):
         log.error(f"Exception hit while command execution. {er}")
     should_not_be_empty(j_log, "Failed to retrieve slow requests")
     return j_log
+
+
+def wait_for_device_rados(host, osd_id, action: str, timeout: int = 900) -> bool:
+    """
+    Waiting for the device to be removed/added based on the action
+    Args:
+        host: host object
+        osd_id: osd id
+        action: add/remove device path
+        timeout: wait timeout in seconds
+    Returns:  True -> pass, False -> fail
+    """
+    dev_path = None
+    end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+    while end_time > datetime.datetime.now():
+        flag = True
+
+        base_cmd = "cephadm shell -- "
+        volume_cmd = f"ceph-volume lvm list {osd_id} --format json"
+        out, _ = host.exec_command(cmd=f"{base_cmd} {volume_cmd}", sudo=True)
+        ceph_volume_dict = json.loads(out)
+        log.info(ceph_volume_dict)
+
+        if ceph_volume_dict:
+            for item in ceph_volume_dict[f"{osd_id}"]:
+                if "osd-block" in item["lv_name"]:
+                    dev_path = item["devices"][0]
+                    break
+
+        log.info(f"dev_path  : {dev_path}")
+        if action == "remove":
+            if dev_path:
+                flag = False
+        else:
+            if not dev_path:
+                flag = False
+        if flag:
+            log.info(f"The OSD {action} is completed.")
+            return True
+        log.info(
+            f"Waiting for OSD {osd_id} to {action}. checking status again in 2 minutes"
+        )
+        time.sleep(120)
+    return False

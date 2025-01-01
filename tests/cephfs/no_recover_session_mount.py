@@ -32,7 +32,13 @@ def run(ceph_cluster, **kw):
     try:
         tc = "CEPH-83573676"
         log.info(f"Running cephfs {tc} test case")
-        fs_util = FsUtils(ceph_cluster)
+        test_data = kw.get("test_data")
+        fs_util = FsUtils(ceph_cluster, test_data=test_data)
+        erasure = (
+            FsUtils.get_custom_config_value(test_data, "erasure")
+            if test_data
+            else False
+        )
         config = kw["config"]
         clients = ceph_cluster.get_ceph_objects("client")
         build = config.get("build", config.get("rhbuild"))
@@ -43,17 +49,29 @@ def run(ceph_cluster, **kw):
         client2 = clients[1]
         mon_node_ip = fs_util.get_mon_node_ips()
         mon_node_ip = ",".join(mon_node_ip)
+        log.info("Collect client IDs if already exists")
         mount_dir = "/mnt/" + "".join(
             secrets.choice(string.ascii_uppercase + string.digits) for i in range(5)
         )
         if "4." in rhbuild:
             fs_name = "cephfs_new"
         else:
-            fs_name = "cephfs"
+            fs_name = "cephfs" if not erasure else "cephfs-ec"
+            fs_details = fs_util.get_fs_info(client1, fs_name)
+
+            if not fs_details:
+                fs_util.create_fs(client1, fs_name)
+        log.info("Collect client IDs if already exists")
+        active_mds = fs_util.get_active_mdss(client1, fs_name)
+        out, rc = client1.exec_command(
+            sudo=True, cmd=f"ceph tell mds.{active_mds[0]} client ls --format json"
+        )
+        client_details = json.loads(out)
+        client_id_list_before = [item["id"] for item in client_details]
         commands = [
             f"ceph fs subvolume create {fs_name} sub1",
             f"mkdir {mount_dir}",
-            f"mount -t ceph {mon_node_ip}:/ {mount_dir} -o name=admin,recover_session=no",
+            f"mount -t ceph {mon_node_ip}:/ {mount_dir} -o name=admin,recover_session=no,fs={fs_name}",
             f"ls {mount_dir}",
         ]
         output = None
@@ -71,25 +89,29 @@ def run(ceph_cluster, **kw):
             "$n"
             " )"
             " bs=1M count=1000; done",
-            "ceph tell mds.0 client ls --format json",
+            f"ceph tell mds.{active_mds[0]} client ls --format json",
         ]
         for command in commands:
             out, rc = client1.exec_command(sudo=True, cmd=command)
-        output = json.loads(out)
-        for item in output:
-            client_metadata = item["client_metadata"]
-            kernel_client = 0
-            if "kernel_version" in client_metadata.keys():
-                kernel_client = 1
-            if (
-                client1.node.shortname == item["client_metadata"]["hostname"]
-                and kernel_client == 1
-            ):
-                client_id = item["id"]
-        log.info("Blocking the Cephfs client")
-        command = f"ceph tell mds.0 client evict id={client_id}"
-        out, rc = client1.exec_command(sudo=True, cmd=command)
-        time.sleep(5)
+
+        log.info("Collect client IDs After mount")
+        out, rc = client1.exec_command(
+            sudo=True, cmd=f"ceph tell mds.{active_mds[0]} client ls --format json"
+        )
+        client_details = json.loads(out)
+        client_id_list_after = [item["id"] for item in client_details]
+        difference_list = [
+            item for item in client_id_list_after if item not in client_id_list_before
+        ]
+        if not difference_list:
+            raise CommandFailed(
+                "no new client it added even after mouting the directory"
+            )
+        log.info(f"Blocking the Cephfs client with id {difference_list}")
+        for id in difference_list:
+            command = f"ceph tell mds.{active_mds[0]} client evict id={id}"
+            out, rc = client1.exec_command(sudo=True, cmd=command)
+            time.sleep(30)
         try:
             log.info("Verifying mount is inaccessible")
             out, rc = client1.exec_command(sudo=True, cmd=f"ls {mount_dir}")

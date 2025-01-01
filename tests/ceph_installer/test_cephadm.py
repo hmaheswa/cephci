@@ -4,6 +4,7 @@ Test suite that verifies the deployment of Red Hat Ceph Storage via the cephadm 
 The intent of the suite is to simulate a standard operating procedure expected by a
 customer.
 """
+
 from copy import deepcopy
 
 from ceph.ceph import Ceph
@@ -15,7 +16,11 @@ from ceph.ceph_admin.common import fetch_method
 from ceph.ceph_admin.crash import Crash
 from ceph.ceph_admin.daemon import Daemon
 from ceph.ceph_admin.grafana import Grafana
-from ceph.ceph_admin.helper import get_cluster_state, validate_log_file_after_enable
+from ceph.ceph_admin.helper import (
+    get_cluster_state,
+    validate_log_file_after_enable,
+    validate_log_rotate,
+)
 from ceph.ceph_admin.host import Host
 from ceph.ceph_admin.iscsi import ISCSI
 from ceph.ceph_admin.mds import MDS
@@ -23,11 +28,13 @@ from ceph.ceph_admin.mgr import Mgr
 from ceph.ceph_admin.mon import Mon
 from ceph.ceph_admin.nfs import NFS
 from ceph.ceph_admin.node_exporter import NodeExporter
+from ceph.ceph_admin.nvmeof import NVMeoF
 from ceph.ceph_admin.orch import Orch
 from ceph.ceph_admin.osd import OSD
 from ceph.ceph_admin.prometheus import Prometheus
 from ceph.ceph_admin.rbd_mirror import RbdMirror
 from ceph.ceph_admin.rgw import RGW
+from cli.utilities.utils import create_trusted_ca_key
 from utility.log import Log
 
 LOG = Log(__name__)
@@ -54,6 +61,7 @@ SERVICE_MAP = dict(
         "cephfs-mirror": CephfsMirror,
         "daemon": Daemon,
         "client-keyring": ClientKeyring,
+        "nvmeof": NVMeoF,
     }
 )
 
@@ -122,7 +130,36 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
     config["overrides"] = kwargs.get("test_data", {}).get("custom-config")
 
     cephadm = CephAdmin(cluster=ceph_cluster, **config)
+
     try:
+        # Check if CA signed SSH keys to be setup
+        if config.get("ca_signed_ssh_keys", False):
+            nodes = ceph_cluster.get_nodes()
+            installer = ceph_cluster.get_nodes("installer")[0]
+            # Create CA signed ssh keys
+            create_trusted_ca_key(installer, nodes, copy_to_other_nodes=True)
+
+            # Create a new key-pair for host access and then sign it with created CA key
+            cmd = 'ssh-keygen -t rsa -f cephadm-ssh-key -N ""'
+            installer.exec_command(cmd=cmd, sudo=True)
+
+        # Check if the bootstrap has to be performed as non-root user
+        if config.get("install_as_non_root_user", False):
+            node = ceph_cluster.get_nodes(role="installer")[0]
+
+            # Add *umask 027* to user's ~/.bashrc file
+            cmd = "echo *umask 027* >> ~/.bashrc"
+            node.exec_command(cmd=cmd, sudo=True)
+
+            # Verify the bashrc file is updated
+            cmd = "cat ~/.bashrc"
+            out, _ = node.exec_command(cmd=cmd, sudo=True)
+            if "*umask 027*" not in out:
+                LOG.error(
+                    "Failed to update user's bashrc file. Install via non-root user failed"
+                )
+                return 1
+
         steps = config.get("steps", [])
         for step in steps:
             cfg = step["config"]
@@ -144,11 +181,14 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
             if not isvalid:
                 LOG.error("Log file validation failure")
                 return 1
+        if config.get("verify_log_rotate") and not validate_log_rotate(cephadm):
+            LOG.error("Log rotate validation failure")
+            return 1
 
     except BaseException as be:  # noqa
         LOG.error(be, exc_info=True)
-        return 1
-    finally:
         LOG.debug("Gathering cluster state after running test_cephadm")
         get_cluster_state(cephadm)
+        return 1
+
     return 0

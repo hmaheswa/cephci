@@ -54,21 +54,21 @@ def run(**kw):
         imagename_1 = "snap_mirrored"
         imagespec_1 = f"{poolname}/{imagename_1}"
 
-        mirror1.create_pool(poolname=poolname)
-        mirror2.create_pool(poolname=poolname)
-        mirror1.create_image(imagespec=imagespec, size=config.get("imagesize"))
-        mirror1.config_mirror(mirror2, poolname=poolname, mode="image")
-        mirror1.enable_mirror_image(poolname, imagename, "journal")
-        mirror2.wait_for_status(poolname=poolname, images_pattern=1)
-        mirror1.benchwrite(imagespec=imagespec, io=config.get("io-total"))
-        mirror1.wait_for_status(imagespec=imagespec, state_pattern="up+stopped")
-        mirror2.wait_for_status(imagespec=imagespec, state_pattern="up+replaying")
+        mirror1.initial_mirror_config(
+            mirror2,
+            poolname=poolname,
+            imagename=imagename,
+            imagesize=config.get("imagesize", "1G"),
+            mode="image",
+            mirrormode="journal",
+            **kw,
+        )
 
         # Create image and enable snapshot mirroring"
+
         mirror1.create_image(imagespec=imagespec_1, size=config.get("imagesize"))
         mirror1.enable_mirror_image(poolname, imagename_1, "snapshot")
         mirror2.wait_for_status(poolname=poolname, images_pattern=2)
-        mirror1.benchwrite(imagespec=imagespec_1, io=config.get("io-total"))
         mirror1.wait_for_status(imagespec=imagespec_1, state_pattern="up+stopped")
         mirror2.wait_for_status(imagespec=imagespec_1, state_pattern="up+replaying")
 
@@ -80,7 +80,6 @@ def run(**kw):
             if i == imagespec_1:
                 mirror1.create_mirror_snapshot(i)
             time.sleep(30)
-
             # Verify value at secondary
             if value != rbd2.image_meta(action="get", image_spec=i, key=key)[:-1]:
                 log.error(f"Meta value did not get mirrored on {i}")
@@ -117,3 +116,7 @@ def run(**kw):
     except Exception as e:
         log.error(e)
         return 1
+
+    # Cleans up the pool configuration
+    finally:
+        mirror1.clean_up(peercluster=mirror2, pools=[poolname])

@@ -61,6 +61,8 @@ tests:
                 mon-ip: node1
                 orphan-initial-daemons: true
                 skip-monitoring-stack: true
+                initial-dashboard-password: admin@123
+                dashboard-password-noupdate: true
           - config:
               command: add_hosts
               service: host
@@ -98,6 +100,37 @@ tests:
       name: deploy cluster
       polarion-id: CEPH-83573713
 
+  - test:
+      name: Monitoring Services deployment
+      desc: Add monitoring services using spec file.
+      module: test_cephadm.py
+      polarion-id: CEPH-83574727
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: prometheus
+                  placement:
+                    count: 1
+                    nodes:
+                      - node1
+                - service_type: grafana
+                  placement:
+                    nodes:
+                      - node1
+                - service_type: alertmanager
+                  placement:
+                    count: 1
+                - service_type: node-exporter
+                  placement:
+                    host_pattern: "*"
+                - service_type: crash
+                  placement:
+                    host_pattern: "*"
+
   # Basic Bucket Operation Tests
 
   - test:
@@ -108,7 +141,6 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets.yaml
-        timeout: 300
 
   - test:
       name: compresstion_with_zlib_type
@@ -118,7 +150,6 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_compression.yaml
-        timeout: 300
 
   - test:
       name: compresstion_with_zstd_type
@@ -128,7 +159,6 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_compression_zstd.yaml
-        timeout: 300
 
   - test:
       name: compresstion_with_snappy_type
@@ -138,17 +168,15 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_compression_snappy.yaml
-        timeout: 300
 
   - test:
       name: Mbuckets_with_Nobjects with sharing enabled
       desc: test to perform bucket ops with sharding operations
       module: sanity_rgw.py
-      polarion-id: CEPH-9245
+      polarion-id: CEPH-83573593
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_sharding.yaml
-        timeout: 300
 
   # REST API test
   - test:
@@ -159,9 +187,17 @@ tests:
       config:
         script-name: user_op_using_rest.py
         config-file-name: test_user_with_REST.yaml
-        timeout: 300
 
   # Swift basic operation
+
+  - test:
+      name: Modify tenant swift user
+      desc: test modify tenant swift user
+      polarion-id: CEPH-9750
+      module: sanity_rgw.py
+      config:
+        script-name: user_create.py
+        config-file-name: test_modify_tenanted_subuser.yaml
 
   - test:
        name: Swift bulk delete operation
@@ -171,7 +207,6 @@ tests:
        config:
            script-name: test_swift_bulk_delete.py
            config-file-name: test_swift_bulk_delete.yaml
-           timeout: 300
 
   - test:
       name: swift upload large object tests
@@ -181,17 +216,42 @@ tests:
       config:
         script-name: test_swift_basic_ops.py
         config-file-name: test_swift_large_upload.yaml
-        timeout: 300
 
   - test:
       name: swift download large object tests
       desc: download large object in swift
-      polarion-id: CEPH-9809
+      polarion-id: CEPH-9809 #CEPH-9816
       module: sanity_rgw.py
       config:
         script-name: test_swift_basic_ops.py
         config-file-name: test_swift_large_download.yaml
-        timeout: 300
+
+  - test:
+      name: Get object with different tenant swift user with same name
+      desc: test get object with different tenant swift user with same name
+      polarion-id: CEPH-9744
+      module: sanity_rgw.py
+      config:
+        script-name: test_swift_basic_ops.py
+        config-file-name: test_get_objects_from_tenant_swift_user.yaml
+
+  - test:
+      name: delete container with different tenant swift user with same name
+      desc: test delete container with different tenant swift user with same name
+      polarion-id: CEPH-9749
+      module: sanity_rgw.py
+      config:
+        script-name: test_swift_basic_ops.py
+        config-file-name: test_delete_container_from_user_of_diff_tenant.yaml
+
+  - test:
+      name: upload large object with same name using tenant swift user
+      desc: test upload large object with same name using tenant swift user
+      polarion-id: CEPH-9814
+      module: sanity_rgw.py
+      config:
+        script-name: test_swift_basic_ops.py
+        config-file-name: test_upload_large_obj_with_same_obj_name.yaml
 
   # Versioning Tests
 
@@ -203,7 +263,6 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_enable.yaml
-        timeout: 300
 
   - test:
       name: Test versioning of objects copy
@@ -213,7 +272,6 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_objects_copy.yaml
-        timeout: 300
 
   - test:
       name: Test suspension of object versioning
@@ -223,7 +281,6 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_objects_suspend.yaml
-        timeout: 300
 
   - test:
       name: Test deletion of object versions
@@ -233,7 +290,6 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_objects_delete.yaml
-        timeout: 300
 
   - test:
       name: Test suspension of versioning
@@ -243,7 +299,6 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_suspend.yaml
-        timeout: 300
 
   - test:
       name: Test overwrite by another user of versioned objects
@@ -253,7 +308,6 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_objects_suspend_from_another_user.yaml
-        timeout: 300
 
   - test:
       name: GET object acl info operations on different object versions
@@ -263,7 +317,6 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_objects_acls.yaml
-        timeout: 300
 
   - test:
       name: Deletes on an object in versioning enabled or suspended container by a new user
@@ -273,17 +326,15 @@ tests:
       config:
         script-name: test_versioning_with_objects.py
         config-file-name: test_versioning_objects_delete_from_another_user.yaml
-        timeout: 300
 
   - test:
       name: Versioning with copy objects
       desc: Versioning with copy objects
-      polarion-id: CEPH-9221
+      polarion-id: CEPH-9221 # Also applies CEPH-10643
       module: sanity_rgw.py
       config:
         script-name: test_versioning_copy_objects.py
         config-file-name: test_versioning_copy_objects.yaml
-        timeout: 300
 
   # BucketPolicy Tests
   - test:
@@ -294,7 +345,6 @@ tests:
       config:
         script-name: test_bucket_policy_ops.py
         config-file-name: test_bucket_policy_replace.yaml
-        timeout: 300
 
   - test:
       name: Delete bucket policy
@@ -304,7 +354,6 @@ tests:
       config:
         script-name: test_bucket_policy_ops.py
         config-file-name: test_bucket_policy_delete.yaml
-        timeout: 300
 
   - test:
       name: Modify existing bucket policy to add a new policy in addition existing policy
@@ -314,7 +363,69 @@ tests:
       config:
         script-name: test_bucket_policy_ops.py
         config-file-name: test_bucket_policy_modify.yaml
-        timeout: 300
+
+  - test:
+      name: ListBucketVersions with bucket policy for users in same tenant
+      desc: Test ListBucketVersions bucket policy for users in same tenant
+      polarion-id: CEPH-11574
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_policy_with_tenant_user.py
+        config-file-name: test_listbucketversion_with_bucketpolicy_for_tenant_user.yaml
+
+  - test:
+      name: GetBucketLocation with bucket policy for users in same tenant
+      desc: Test GetBucketLocation bucket policy for users in same tenant
+      polarion-id: CEPH-11623
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_policy_with_tenant_user.py
+        config-file-name: test_bucketlocation_using_bucketpolicy_with_tenantuser.yaml
+
+  - test:
+      name: test bucket policy with multiple statements
+      desc: test bucket policy with multiple statements
+      polarion-id: CEPH-11216
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_policy_ops.py
+        config-file-name: test_bucket_policy_multiple_statements.yaml
+
+  - test:
+      name: test bucket policy with conflicting statements
+      desc: test bucket policy with conflicting statements
+      polarion-id: CEPH-11217
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_policy_ops.py
+        config-file-name: test_bucket_policy_multiple_conflicting_statements.yaml
+
+  - test:
+      name: test bucket policy with condition blocks
+      desc: test bucket policy with condition blocks
+      polarion-id: CEPH-11589
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_policy_ops.py
+        config-file-name: test_bucket_policy_condition.yaml
+
+  - test:
+      name: test bucket policy condition block with explicit deny
+      desc: test bucket policy condition block with explicit deny
+      polarion-id: CEPH-11590
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_policy_ops.py
+        config-file-name: test_bucket_policy_condition_explicit_deny.yaml
+
+  - test:
+      name: test bucket policy deny actions
+      desc: test bucket policy deny actions
+      polarion-id: CEPH-11216
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_policy_ops.py
+        config-file-name: test_bucket_policy_deny_actions.yaml
 
   # Bucket Lifecycle Tests
 
@@ -324,19 +435,17 @@ tests:
       polarion-id: CEPH-11177 # also applies to CEPH-11182, CEPH-11188 and CEPH-11187
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_multiple_rule_prefix_current_days.yaml
-        timeout: 300
 
   - test:
       name: object expiration with expiration set to Date
       desc: Test object expiration with expiration set to Date
-      polarion-id: CEPH-11185
+      polarion-id: CEPH-11185 # also applies to CEPH-83574679
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_date.yaml
-        timeout: 300
 
   - test:
       name: object expiration for delete marker set
@@ -344,9 +453,8 @@ tests:
       polarion-id: CEPH-11189
       module: sanity_rgw.py
       config:
-        script-name: test_bucket_lifecycle_object_expiration.py
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
         config-file-name: test_lc_rule_delete_marker.yaml
-        timeout: 300
 
   - test:
       name: Read lifecycle configuration on a given bucket
@@ -356,7 +464,6 @@ tests:
       config:
         script-name: test_bucket_lifecycle_config_ops.py
         config-file-name: test_bucket_lifecycle_config_read.yaml
-        timeout: 300
 
   - test:
       name: lifecycle with version enabled bucket containing multiple object versions
@@ -366,7 +473,6 @@ tests:
       config:
         script-name: test_bucket_lifecycle_config_ops.py
         config-file-name: test_bucket_lifecycle_config_versioning.yaml
-        timeout: 300
 
   - test:
       name: Disable lifecycle configuration on a given bucket
@@ -376,17 +482,15 @@ tests:
       config:
         script-name: test_bucket_lifecycle_config_ops.py
         config-file-name: test_bucket_lifecycle_config_disable.yaml
-        timeout: 300
 
   - test:
       name: Modify lifecycle configuration on a given bucket
       desc: Modify lifecycle configuration on a given bucket
-      polarion-id: CEPH-11120
+      polarion-id: CEPH-11200
       module: sanity_rgw.py
       config:
         script-name: test_bucket_lifecycle_config_ops.py
         config-file-name: test_bucket_lifecycle_config_modify.yaml
-        timeout: 300
 
   # Multi Tenant Tests
 
@@ -398,7 +502,6 @@ tests:
       config:
         script-name: test_multitenant_user_access.py
         config-file-name: test_multitenant_access.yaml
-        timeout: 300
 
   - test:
       name: Generate secret for tenant user
@@ -408,7 +511,6 @@ tests:
       config:
         script-name: test_tenant_user_secret_key.py
         config-file-name: test_tenantuser_secretkey_gen.yaml
-        timeout: 300
 
   # Bucket Listing Tests
   - test:
@@ -419,7 +521,6 @@ tests:
       config:
         script-name: test_bucket_listing.py
         config-file-name: test_bucket_listing_flat_ordered.yaml
-        timeout: 300
 
   - test:
       name: ordered listing of versionsed bucket with top level objects
@@ -429,7 +530,6 @@ tests:
       config:
         script-name: test_bucket_listing.py
         config-file-name: test_bucket_listing_flat_ordered_versionsing.yaml
-        timeout: 300
 
   - test:
       name: unordered listing of bucket with top level objects
@@ -439,7 +539,6 @@ tests:
       config:
         script-name: test_bucket_listing.py
         config-file-name: test_bucket_listing_flat_unordered.yaml
-        timeout: 300
 
   - test:
       name: ordered listing of bucket with pseudo directories and objects
@@ -449,7 +548,6 @@ tests:
       config:
         script-name: test_bucket_listing.py
         config-file-name: test_bucket_listing_pseudo_ordered.yaml
-        timeout: 300
 
   - test:
       name: ordered listing of bucket with pseudo directories only
@@ -459,7 +557,6 @@ tests:
       config:
         script-name: test_bucket_listing.py
         config-file-name: test_bucket_listing_pseudo_ordered_dir_only.yaml
-        timeout: 300
 
   - test:
       name: Bucket radoslist
@@ -469,7 +566,6 @@ tests:
       config:
         script-name: test_bucket_listing.py
         config-file-name: test_bucket_radoslist.yaml
-        timeout: 300
 
   # Bucket Request Payer tests
 
@@ -481,7 +577,6 @@ tests:
       config:
         script-name: test_bucket_request_payer.py
         config-file-name: test_bucket_request_payer.yaml
-        timeout: 300
 
   - test:
       name: bucket request payer with object download
@@ -491,7 +586,6 @@ tests:
       config:
         script-name: test_bucket_request_payer.py
         config-file-name: test_bucket_request_payer_download.yaml
-        timeout: 300
 
   #resharding tests
   - test:
@@ -502,7 +596,6 @@ tests:
       config:
         script-name: test_dynamic_bucket_resharding.py
         config-file-name: test_manual_resharding.yaml
-        timeout: 500
 
   # AWS4 Auth tests
   - test:
@@ -513,7 +606,6 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_aws4.yaml
-        timeout: 300
 
   # v1 tests
   # ACLs tests
@@ -525,9 +617,9 @@ tests:
       module: sanity_rgw.py
       config:
         test-version: v1
+        run-on-rgw: true
         script-name: test_acls.py
         config-file-name: test_acls.yaml
-        timeout: 300
 
   - test:
       name: test acls on all users
@@ -536,9 +628,9 @@ tests:
       module: sanity_rgw.py
       config:
         test-version: v1
+        run-on-rgw: true
         script-name: test_acls_all_usrs.py
         config-file-name: test_acls_all_usrs.yaml
-        timeout: 300
 
   - test:
       name: test acls with copy objects on different users
@@ -547,9 +639,9 @@ tests:
       module: sanity_rgw.py
       config:
         test-version: v1
+        run-on-rgw: true
         script-name: test_acls_copy_obj.py
         config-file-name: test_acls_copy_obj.yaml
-        timeout: 300
 
   - test:
       name: acls reset
@@ -558,9 +650,9 @@ tests:
       module: sanity_rgw.py
       config:
         test-version: v1
+        run-on-rgw: true
         script-name: test_acls_reset.py
         config-file-name: test_acls_reset.yaml
-        timeout: 300
 
   # multipart test
 
@@ -571,9 +663,9 @@ tests:
       module: sanity_rgw.py
       config:
         test-version: v1
+        run-on-rgw: true
         script-name: test_multipart_upload_cancel.py
         config-file-name: test_multipart_upload_cancel.yaml
-        timeout: 300
 
   # User, Bucket rename, Bucket link and unlink
 
@@ -585,7 +677,6 @@ tests:
       config:
         script-name: test_user_bucket_rename.py
         config-file-name: test_user_rename.yaml
-        timeout: 500
 
   - test:
       name: Bucket rename
@@ -596,7 +687,6 @@ tests:
         test-version: v2
         script-name: test_user_bucket_rename.py
         config-file-name: test_bucket_rename.yaml
-        timeout: 500
 
   - test:
       name: Bucket link and unlink
@@ -607,7 +697,6 @@ tests:
         test-version: v2
         script-name: test_user_bucket_rename.py
         config-file-name: test_bucket_link_unlink.yaml
-        timeout: 500
 
   # Multifactor Authentication tests
   - test:
@@ -621,8 +710,7 @@ tests:
         config-file-name: test_rgw_mfa.yaml
         extra-pkgs:
           8:
-            - https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/o/oathtool-2.6.2-3.el8.x86_64.rpm
-        timeout: 500
+            - https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/o/oathtool-2.6.12-1.el8.x86_64.rpm
 
   - test:
       name: multipart versioned object deletion with mfa token
@@ -633,10 +721,6 @@ tests:
         test-version: v2
         script-name: test_rgw_mfa.py
         config-file-name: test_rgw_mfa_multipart.yaml
-        extra-pkgs:
-          8:
-            - https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/o/oathtool-2.6.2-3.el8.x86_64.rpm
-        timeout: 500
 
   - test:
       name: incorrect syntax for mfa resync commnad appropriate usage message is displayed
@@ -647,10 +731,6 @@ tests:
         test-version: v2
         script-name: test_rgw_mfa.py
         config-file-name: test_rgw_mfa_incorrect_syntax.yaml
-        extra-pkgs:
-          8:
-            - https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/o/oathtool-2.6.2-3.el8.x86_64.rpm
-        timeout: 500
 
   - test:
       abort-on-fail: true
@@ -676,6 +756,7 @@ tests:
       module: test_s3.py
       name: execute s3tests
       polarion-id: CEPH-83575225
+      comments: Known issue - Ceph tracker 55614
 
   # Encryption tests
 
@@ -687,19 +768,170 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_enc.yaml
-        timeout: 300
 
   # Index-less buckets
 
   - test:
       name: Indexless buckets
       desc: Indexless (blind) buckets
-      comments: Known issue BZ-2043366
       polarion-id: CEPH-10354 # also applies to CEPH-10357
       module: sanity_rgw.py
       config:
         test-version: v2
         script-name: test_indexless_buckets.py
         config-file-name: test_indexless_buckets_s3.yaml
-        timeout: 500
 
+  - test:
+      name: Versioning with copy objects and delete with differnt user
+      desc: Versioning with copy objects and delete with differnt user
+      polarion-id: CEPH-9353 # Also applies for CEPH-10215
+      module: sanity_rgw.py
+      config:
+        script-name: test_versioning_copy_objects.py
+        config-file-name: test_delete_version_object_using_different_user.yaml
+
+  - test:
+      name: Test deleting the current version of the object
+      desc: Deleting the current version of the object
+      polarion-id: CEPH-10647
+      module: sanity_rgw.py
+      config:
+        script-name: test_versioning_with_objects.py
+        config-file-name: test_delete_current_version_object.yaml
+
+  - test:
+      name: Test copy versioned objects to another versioned bucket
+      desc: copy versioned objects to another versioned bucket
+      polarion-id: CEPH-10644
+      module: sanity_rgw.py
+      config:
+        script-name: test_versioning_copy_objects.py
+        config-file-name: test_copy_version_object_to_version_bucket.yaml
+
+  - test:
+      name: Test Write modify and read objects in the versioned bucket
+      desc: Test Write, modify and read objects in the versioned bucket
+      polarion-id: CEPH-10641
+      module: sanity_rgw.py
+      config:
+        script-name: test_versioning_with_objects.py
+        config-file-name: test_access_versioned_objects.yaml
+
+  - test:
+      name: object lock verification
+      desc: object lock test
+      polarion-id: CEPH-83574055
+      module: sanity_rgw.py
+      config:
+        script-name: test_object_lock.py
+        config-file-name: test_object_lock_governance.yaml
+
+  - test:
+      name: object level retention test Compliance
+      desc: object level retention test Compliance
+      polarion-id: CEPH-83574058
+      module: sanity_rgw.py
+      config:
+        script-name: test_object_level_retention.py
+        config-file-name: test_object_level_compliance.yaml
+
+  - test:
+      name: object level retention test Governance mode
+      desc: object level retention test Governance mode
+      polarion-id: CEPH-83574058
+      module: sanity_rgw.py
+      config:
+        script-name: test_object_level_retention.py
+        config-file-name: test_object_level_governance.yaml
+
+  - test:
+      name: NFS export delete
+      desc: NFS cluster and exports delete
+      polarion-id: CEPH-83574600 # also covers CEPH-83574601
+      module: sanity_rgw.py
+      config:
+        script-name: ../nfs_ganesha/nfs_cluster.py
+        config-file-name: ../../nfs_ganesha/config/nfs_cluster_delete.yaml
+
+  - test:
+      name: Test user modify with placement id
+      desc: Test user modify with placement id
+      polarion-id: CEPH-83575880
+      comments: Known issue Bug-2245699
+      module: sanity_rgw.py
+      config:
+        script-name: user_create.py
+        config-file-name: test_user_modify_with_placementid.yaml
+
+  - test:
+      name: Bucket Lifecycle expiration of incomplete multipart
+      desc: Bucket Lifecycle expiration of incomplete multipart
+      polarion-id: CEPH-11195
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_lifecycle_config_ops.py
+        config-file-name: test_bucket_lc_incomplete_multipart.yaml
+
+  - test:
+      name: Swift user with read access
+      desc: Swift user with read access
+      polarion-id: CEPH-9220
+      module: sanity_rgw.py
+      config:
+        script-name: test_swift_basic_ops.py
+        config-file-name: test_swift_user_access_read.yaml
+
+  - test:
+      name: Swift user with write access
+      desc: Swift user with read access
+      polarion-id: CEPH-9220
+      module: sanity_rgw.py
+      config:
+        script-name: test_swift_basic_ops.py
+        config-file-name: test_swift_user_access_write.yaml
+
+  - test:
+      name: Swift user with readwrite access
+      desc: Swift user with read access
+      polarion-id: CEPH-9220
+      module: sanity_rgw.py
+      config:
+        script-name: test_swift_basic_ops.py
+        config-file-name: test_swift_user_access_readwrite.yaml
+
+  - test:
+      name: Test LC with custom worktime
+      desc: Test LC with custom worktime
+      polarion-id: CEPH-83583080
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
+        config-file-name: test_lc_with_custom_worktime.yaml
+
+  - test:
+      name: Test Etag not empty for complete multipart upload in aws
+      desc: Test Etag not empty for complete multipart upload in aws
+      polarion-id: CEPH-9801
+      module: sanity_rgw.py
+      config:
+        script-name: ../aws/test_aws.py
+        config-file-name: ../../aws/configs/test_complete_multipart_upload_etag_not_empty.yaml
+
+  # - test:
+  #     name: Test LC transition with rule by lc process
+  #     desc: Test LC transition with rule by lc process
+  #     polarion-id: CEPH-83574044
+  #     module: sanity_rgw.py
+  #     comments: known issue (BZ-2315885) targeted to 7.1z3
+  #     config:
+  #       script-name: test_bucket_lifecycle_object_expiration_transition.py
+  #       config-file-name: test_lc_transition_with_lc_process.yaml
+
+  - test:
+      name: Test LC transition without rule by lc process
+      desc: Test LC transition without rule by lc process
+      polarion-id: CEPH-83574044
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_lifecycle_object_expiration_transition.py
+        config-file-name: test_lc_process_without_applying_rule.yaml

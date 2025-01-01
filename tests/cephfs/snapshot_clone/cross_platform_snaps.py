@@ -2,8 +2,10 @@ import random
 import string
 import traceback
 
+from ceph.ceph import CommandFailed
 from tests.cephfs.cephfs_utilsV1 import FsUtils
 from utility.log import Log
+from utility.retry import retry
 
 log = Log(__name__)
 
@@ -41,7 +43,13 @@ def run(ceph_cluster, **kw):
 
     """
     try:
-        fs_util = FsUtils(ceph_cluster)
+        test_data = kw.get("test_data")
+        fs_util = FsUtils(ceph_cluster, test_data=test_data)
+        erasure = (
+            FsUtils.get_custom_config_value(test_data, "erasure")
+            if test_data
+            else False
+        )
         config = kw.get("config")
         clients = ceph_cluster.get_ceph_objects("client")
         build = config.get("build", config.get("rhbuild"))
@@ -53,7 +61,7 @@ def run(ceph_cluster, **kw):
                 f"This test requires minimum 1 client nodes.This has only {len(clients)} clients"
             )
             return 1
-        default_fs = "cephfs"
+        default_fs = "cephfs" if not erasure else "cephfs-ec"
         mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
@@ -61,7 +69,7 @@ def run(ceph_cluster, **kw):
         client1 = clients[0]
         fs_details = fs_util.get_fs_info(client1)
         if not fs_details:
-            fs_util.create_fs(client1, "cephfs")
+            fs_util.create_fs(client1, default_fs)
         subvolumegroup_list = [
             {"vol_name": default_fs, "group_name": "subvol_cross_platform_snapshot_1"},
         ]
@@ -85,7 +93,7 @@ def run(ceph_cluster, **kw):
         fs_util.fuse_mount(
             [client1],
             fuse_mounting_dir_1,
-            extra_params=f" -r {subvol_path}",
+            extra_params=f" -r {subvol_path} --client_fs {default_fs}",
         )
         fs_util.create_file_data(
             client1, fuse_mounting_dir_1, 3, "snap1", "data_from_fuse_mount "
@@ -107,6 +115,7 @@ def run(ceph_cluster, **kw):
             kernel_mounting_dir_1,
             ",".join(mon_node_ips),
             sub_dir=f"{subvol_path}",
+            extra_params=f",fs={default_fs}",
         )
         fs_util.create_file_data(
             client1, kernel_mounting_dir_1, 3, "snap1", "data_from_kernel_mount "
@@ -121,8 +130,10 @@ def run(ceph_cluster, **kw):
         kernel_files_checksum = fs_util.get_files_and_checksum(
             client1, kernel_mounting_dir_1
         )
-        client1.exec_command(
-            sudo=True, cmd=f"cd {kernel_mounting_dir_1};cp .snap/_snap_1_*/* ."
+        retry_revert = retry(CommandFailed, tries=3, delay=60)(client1.exec_command)
+        retry_revert(
+            sudo=True,
+            cmd=f"cd {kernel_mounting_dir_1};yes | cp -rf .snap/_snap_1_*/* .",
         )
         kernel_mount_revert_snap_fuse = fs_util.get_files_and_checksum(
             client1, kernel_mounting_dir_1
@@ -132,8 +143,9 @@ def run(ceph_cluster, **kw):
                 "checksum is not when reverted to snap1 i.e., from fuse mount snapshot revert"
             )
             return 1
-        client1.exec_command(
-            sudo=True, cmd=f"cd {fuse_mounting_dir_1};cp .snap/_snap_2_*/* ."
+
+        retry_revert(
+            sudo=True, cmd=f"cd {fuse_mounting_dir_1};yes | cp -rf .snap/_snap_2_*/* ."
         )
         fuse_mount_revert_snap_kernel = fs_util.get_files_and_checksum(
             client1, kernel_mounting_dir_1

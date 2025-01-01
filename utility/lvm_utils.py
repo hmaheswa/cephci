@@ -1,5 +1,5 @@
 def pvcreate(osd, devices):
-    osd.exec_command(cmd="sudo pvcreate %s" % devices)
+    osd.exec_command(cmd="sudo pvcreate -ff %s" % devices)
 
 
 def vgcreate(osd, vg_name, devices):
@@ -12,11 +12,43 @@ def lvcreate(osd, lv_name, vg_name, size):
     return lv_name
 
 
+def lvm_create(osd, lv_name, vg_name, size):
+    osd.exec_command(cmd="sudo lvcreate -n %s -L %s %s " % (lv_name, size, vg_name))
+    return lv_name
+
+
+def lvconvert(osd, cache_type, vg_name, cache_name, data_name):
+    if cache_type == "cache_pool":
+        command = (
+            f"echo 'y' | lvconvert --type cache --cachepool "
+            f"{vg_name}/{cache_name} {vg_name}/{data_name}"
+        )
+    elif cache_type == "cache_vol":
+        command = (
+            f"echo -e 'y\ny' | lvconvert --type cache --cachevol "
+            f"{vg_name}/{cache_name} {vg_name}/{data_name}"
+        )
+    elif cache_type == "writecache":
+        command = (
+            f"echo -e 'y\ny' | lvconvert --type writecache --cachevol "
+            f"{vg_name}/{cache_name} {vg_name}/{data_name}"
+        )
+
+    osd.exec_command(cmd=command, sudo=True)
+
+
+def lvm_uncache(osd, vg_name):
+    # To flush the cache back to main LV
+    osd.exec_command(cmd=f"sudo lvconvert --uncache {vg_name}")
+
+
 def make_partition(osd, device, start=None, end=None, gpt=False):
-    osd.exec_command(
-        cmd="sudo parted --script %s mklabel gpt" % device
-    ) if gpt else osd.exec_command(
-        cmd="sudo parted --script %s mkpart primary %s %s" % (device, start, end)
+    (
+        osd.exec_command(cmd="sudo parted --script %s mklabel gpt" % device)
+        if gpt
+        else osd.exec_command(
+            cmd="sudo parted --script %s mkpart primary %s %s" % (device, start, end)
+        )
     )
 
 

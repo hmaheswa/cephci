@@ -1,5 +1,8 @@
+import json
+
 from ceph.ceph_admin import CephAdmin
 from ceph.rados.core_workflows import RadosOrchestrator
+from ceph.rados.pool_workflows import PoolFunctions
 from tests.rados.monitor_configurations import MonConfigMethods
 from utility.log import Log
 
@@ -29,49 +32,62 @@ def run(ceph_cluster, **kw):
     cephadm = CephAdmin(cluster=ceph_cluster, **config)
     rados_obj = RadosOrchestrator(node=cephadm)
     mon_obj = MonConfigMethods(rados_obj=rados_obj)
+    pool_obj = PoolFunctions(node=cephadm)
     out, err = cephadm.shell(["uuidgen"])
     uuid = out.split("-")[0]
 
     if config.get("ec_pool"):
         ec_config = config.get("ec_pool")
         ec_config.setdefault("pool_name", f"ecpool_{uuid}")
-        if not rados_obj.create_erasure_pool(name=uuid, **ec_config):
-            log.error("Failed to create the EC Pool")
-            return 1
-
-        if ec_config.get("test_overwrites_pool"):
-            if not rados_obj.verify_ec_overwrites(**ec_config):
+        try:
+            if not rados_obj.create_erasure_pool(name=uuid, **ec_config):
                 log.error("Failed to create the EC Pool")
                 return 1
-        else:
-            if not rados_obj.bench_write(**ec_config):
-                log.error("Failed to write objects into the EC Pool")
-                return 1
-            rados_obj.bench_read(**ec_config)
-            log.info("Created the EC Pool, Finished writing data into the pool")
 
-        if ec_config.get("delete_pool"):
-            if not rados_obj.detete_pool(pool=ec_config["pool_name"]):
-                log.error("Failed to delete EC Pool")
-                return 1
+            if ec_config.get("test_overwrites_pool"):
+                if not rados_obj.verify_ec_overwrites(**ec_config):
+                    log.error("Failed to create the EC Pool")
+                    return 1
+            else:
+                if not rados_obj.bench_write(**ec_config):
+                    log.error("Failed to write objects into the EC Pool")
+                    return 1
+                rados_obj.bench_read(**ec_config)
+                log.info("Created the EC Pool, Finished writing data into the pool")
+
+                if ec_config.get("delete_pool"):
+                    if not rados_obj.delete_pool(pool=ec_config["pool_name"]):
+                        log.error("Failed to delete EC Pool")
+                        return 1
+        except Exception as err:
+            log.error(f"Hit Exception during EC pool testing. \n ERROR : \n {err}\n")
+            rados_obj.rados_pool_cleanup()
+            return 1
 
     if config.get("replicated_pool"):
         rep_config = config.get("replicated_pool")
         rep_config.setdefault("pool_name", f"repool_{uuid}")
-        if not rados_obj.create_pool(
-            **rep_config,
-        ):
-            log.error("Failed to create the replicated Pool")
-            return 1
-        if not rados_obj.bench_write(**rep_config):
-            log.error("Failed to write objects into the EC Pool")
-            return 1
-        rados_obj.bench_read(**rep_config)
-        log.info("Created the replicated Pool, Finished writing data into the pool")
-        if rep_config.get("delete_pool"):
-            if not rados_obj.detete_pool(pool=rep_config["pool_name"]):
-                log.error("Failed to delete replicated Pool")
+        try:
+            if not rados_obj.create_pool(
+                **rep_config,
+            ):
+                log.error("Failed to create the replicated Pool")
                 return 1
+            if not rados_obj.bench_write(**rep_config):
+                log.error("Failed to write objects into the EC Pool")
+                return 1
+            rados_obj.bench_read(**rep_config)
+            log.info("Created the replicated Pool, Finished writing data into the pool")
+            if rep_config.get("delete_pool"):
+                if not rados_obj.delete_pool(pool=rep_config["pool_name"]):
+                    log.error("Failed to delete replicated Pool")
+                    return 1
+        except Exception as err:
+            log.error(
+                f"Hit Exception during Replicated pool testing. \n ERROR : \n {err}\n"
+            )
+            rados_obj.rados_pool_cleanup()
+            return 1
 
     if config.get("set_pool_configs"):
         changes = config["set_pool_configs"]
@@ -168,10 +184,105 @@ def run(ceph_cluster, **kw):
 
     if config.get("delete_pools"):
         for name in config["delete_pools"]:
-            if not rados_obj.detete_pool(name):
+            if not rados_obj.delete_pool(name):
                 log.error(f"the pool {name} could not be deleted")
                 return 1
         log.info("deleted all the given pools successfully")
 
-    log.info("All Pre-requisites completed to run Rados suite")
+    if config.get("Verify_osd_alloc_size"):
+        alloc_size = config["Verify_osd_alloc_size"].get("allocation_size", 4096)
+        log.info(
+            "Verification of min-alloc size & fragmentation scores for Bluestore OSDs"
+        )
+
+        try:
+            # Creating a test pool, filling it with some data and then checking fragmentation scores.
+            pool_name = "alloc-test-pool"
+            rados_obj.create_pool(pool_name=pool_name)
+            rados_obj.bench_write(pool_name=pool_name)
+            pool_id = pool_obj.get_pool_id(pool_name=pool_name)
+            pgid = f"{pool_id}.0"
+            pg_set = rados_obj.get_pg_acting_set(pg_num=pgid)
+
+            log.info(
+                f"Checking the fragmentation & min-alloc scores on OSDs : {pg_set}"
+            )
+            for osd in pg_set:
+                host = rados_obj.fetch_host_node(daemon_type="osd", daemon_id=str(osd))
+
+                # Checking min-alloc size config param for the OSD
+                params = [
+                    "bluestore_min_alloc_size_hdd",
+                    "bluestore_min_alloc_size_ssd",
+                ]
+                for param in params:
+                    alloc_cmd = f"ceph daemon /var/run/ceph/ceph-osd.{osd}.asok config get {param}"
+                    cmd = f"cephadm -v shell -- {alloc_cmd} -f json"
+                    log.debug(f"Checking the {param} on {osd} on host {host.hostname}.")
+                    out, err = host.exec_command(sudo=True, cmd=cmd)
+                    details = json.loads(out)
+                    if int(details[param]) != alloc_size:
+                        log.error(
+                            f"Allocation unit for osd {osd} is not {alloc_size},but it is {details[param]}"
+                        )
+                        raise Exception(
+                            f"Allocation unit on osd {osd} is not {alloc_size}"
+                        )
+
+                # Checking min-alloc size for the OSD from the dump
+                alloc_cmd = f"ceph daemon /var/run/ceph/ceph-osd.{osd}.asok bluestore allocator dump block"
+                cmd = f"cephadm -v shell -- {alloc_cmd} -f json"
+                log.debug(
+                    f"Checking the allocation size on {osd} on host {host.hostname}."
+                )
+                out, err = host.exec_command(sudo=True, cmd=cmd)
+                details = json.loads(out)
+                if int(details["alloc_unit"]) != alloc_size:
+                    log.error(
+                        f"Allocation unit for osd {osd} is not {alloc_size},but it is {details['alloc_unit']}"
+                    )
+                    raise Exception(f"Allocation unit on osd {osd} is not {alloc_size}")
+
+                # Checking fragmentation scores for OSD
+                frag_cmd = f"ceph daemon /var/run/ceph/ceph-osd.{osd}.asok bluestore allocator score block"
+                cmd = f"cephadm -v shell -- {frag_cmd} -f json"
+                log.debug(
+                    f"Checking the Fragmentation score on {osd} on host {host.hostname}."
+                )
+                out, err = host.exec_command(sudo=True, cmd=cmd)
+                details = json.loads(out)
+                log.info(
+                    f"Fragmentation score for the OSD : {details['fragmentation_rating']}"
+                )
+
+                if 0.9 < float(details["fragmentation_rating"]) < 1.0:
+                    log.error(
+                        f"Fragmentation on osd {osd} is dangerously high."
+                        f"Ideal range 0.0 to 0.7. Actual fragmentation on OSD: {details['alloc_unit']}"
+                    )
+                    raise Exception(f"Fragmentation on osd {osd} is dangerously high.")
+                log.info(
+                    f"Completed checking fragmentation & min-alloc scores on OSD : {osd}"
+                )
+        except Exception as e:
+            log.error(f"Failed with exception: {e.__doc__}")
+            log.exception(e)
+            return 1
+        finally:
+            log.info(
+                "\n \n ************** Execution of finally block begins here *************** \n \n"
+            )
+            # removal of rados pools
+            rados_obj.rados_pool_cleanup()
+            # log cluster health
+            rados_obj.log_cluster_health()
+            # check for crashes after test execution
+            if rados_obj.check_crash_status():
+                log.error("Test failed due to crash at the end of test")
+                return 1
+        log.info(
+            f"Completed check of fragmentation & min-alloc scores on OSDs : {pg_set}. Pass"
+        )
+
+    log.info("All the test cases have been completed. Pass")
     return 0
